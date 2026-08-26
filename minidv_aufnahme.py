@@ -7,10 +7,157 @@ import subprocess
 import threading
 import tkinter as tk
 import sys
-import tempfile
+import platform
 
 from tkinter import messagebox, filedialog
 from datetime import datetime
+
+
+class DependencyManager:
+    """Verwaltet die Prüfung und Installation von Abhängigkeiten."""
+    
+    @staticmethod
+    def check_dependency(command):
+        """Prüft ob ein Befehl verfügbar ist."""
+        return shutil.which(command) is not None
+    
+    @staticmethod
+    def get_package_manager():
+        """Ermittelt den Paketmanager des Systems."""
+        system = platform.system().lower()
+        
+        if system == "linux":
+            # Prüfe verschiedene Paketmanager
+            if shutil.which("apt"):
+                return "apt", "sudo apt install -y"
+            elif shutil.which("dnf"):
+                return "dnf", "sudo dnf install -y"
+            elif shutil.which("yum"):
+                return "yum", "sudo yum install -y"
+            elif shutil.which("pacman"):
+                return "pacman", "sudo pacman -S --noconfirm"
+            elif shutil.which("zypper"):
+                return "zypper", "sudo zypper install -y"
+        elif system == "darwin":  # macOS
+            if shutil.which("brew"):
+                return "brew", "brew install"
+        elif system == "windows":
+            # Windows - wir geben nur Hinweise
+            return "windows", None
+        
+        return None, None
+    
+    @staticmethod
+    def install_dependency(package_name, package_manager_cmd):
+        """Installiert eine Abhängigkeit."""
+        if not package_manager_cmd:
+            return False, "Kein Paketmanager gefunden"
+        
+        try:
+            # Für apt brauchen wir das Paket ohne Version
+            cmd = package_manager_cmd.split() + [package_name]
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=120
+            )
+            
+            if result.returncode == 0:
+                return True, "Installation erfolgreich"
+            else:
+                return False, f"Fehler: {result.stderr}"
+                
+        except subprocess.TimeoutExpired:
+            return False, "Zeitüberschreitung bei Installation"
+        except Exception as e:
+            return False, f"Fehler: {str(e)}"
+    
+    @staticmethod
+    def ensure_dependencies(master, callback=None):
+        """Prüft und installiert alle benötigten Abhängigkeiten."""
+        missing = []
+        install_commands = []
+        
+        # Prüfe dvgrab für FireWire
+        if not DependencyManager.check_dependency("dvgrab"):
+            missing.append("dvgrab")
+            install_commands.append("dvgrab")
+        
+        # Prüfe ffmpeg für USB
+        if not DependencyManager.check_dependency("ffmpeg"):
+            missing.append("ffmpeg")
+            install_commands.append("ffmpeg")
+        
+        if not missing:
+            return True, "Alle Abhängigkeiten sind installiert"
+        
+        # Finde Paketmanager
+        pm_name, pm_cmd = DependencyManager.get_package_manager()
+        
+        if pm_name == "windows":
+            # Windows - nur Hinweis anzeigen
+            msg = (
+                "Folgende Programme werden benötigt:\n\n"
+                f"{', '.join(missing)}\n\n"
+                "Bitte installiere sie manuell:\n"
+                "• dvgrab: https://sourceforge.net/projects/dvgrab/\n"
+                "• ffmpeg: https://ffmpeg.org/download.html\n\n"
+                "Alternativ mit Chocolatey:\n"
+                "choco install ffmpeg\n"
+                "choco install dvgrab"
+            )
+            messagebox.showwarning("Abhängigkeiten fehlen", msg)
+            return False, "Manuelle Installation erforderlich"
+        
+        if not pm_cmd:
+            msg = (
+                f"Folgende Programme werden benötigt:\n\n"
+                f"{', '.join(missing)}\n\n"
+                "Bitte installiere sie manuell mit deinem Paketmanager."
+            )
+            messagebox.showwarning("Abhängigkeiten fehlen", msg)
+            return False, "Manuelle Installation erforderlich"
+        
+        # Frage ob installiert werden soll
+        pm_display = pm_name.upper()
+        msg = (
+            f"Folgende Programme werden benötigt:\n\n"
+            f"{', '.join(missing)}\n\n"
+            f"Soll {pm_display} die Installation durchführen?\n\n"
+            f"Befehl: {pm_cmd} {' '.join(install_commands)}"
+        )
+        
+        if not messagebox.askyesno("Abhängigkeiten installieren", msg):
+            return False, "Installation abgebrochen"
+        
+        # Installiere jede Abhängigkeit
+        progress_window = None
+        if callback:
+            progress_window = callback("Installiere Abhängigkeiten...")
+        
+        all_success = True
+        errors = []
+        
+        for pkg in install_commands:
+            success, msg = DependencyManager.install_dependency(pkg, pm_cmd)
+            if not success:
+                all_success = False
+                errors.append(f"{pkg}: {msg}")
+        
+        if progress_window:
+            progress_window.destroy()
+        
+        if all_success:
+            messagebox.showinfo("Erfolg", "Alle Abhängigkeiten wurden installiert!")
+            return True, "Installation abgeschlossen"
+        else:
+            messagebox.showerror(
+                "Installationsfehler",
+                f"Einige Pakete konnten nicht installiert werden:\n\n" + "\n".join(errors) +
+                "\n\nBitte installiere sie manuell."
+            )
+            return False, "Installation fehlgeschlagen"
 
 
 class MiniDVRecorder:
@@ -30,8 +177,11 @@ class MiniDVRecorder:
         os.makedirs(self.output_dir, exist_ok=True)
 
         master.title("MiniDV / Webcam Überspielung")
-        master.geometry("500x620")
+        master.geometry("520x650")
         master.resizable(False, False)
+
+        # ========== Prüfe Abhängigkeiten beim Start ==========
+        self._check_dependencies_at_start()
 
         # ========== MODUS-AUSWAHL (ganz oben) ==========
         self.mode_frame = tk.Frame(master)
@@ -65,7 +215,16 @@ class MiniDVRecorder:
         )
         self.usb_radio.pack(side=tk.LEFT, padx=5)
 
-        # Status der Kamera/Webcam
+        # ========== Statusleiste für Abhängigkeiten ==========
+        self.dep_status = tk.Label(
+            master,
+            text="✅ Abhängigkeiten: OK",
+            font=("Arial", 9),
+            fg="green"
+        )
+        self.dep_status.pack(pady=(2, 0))
+
+        # ========== Kamera/Webcam Status ==========
         self.camera_status = tk.Label(
             master,
             text="📹 Kamera bereit",
@@ -135,6 +294,23 @@ class MiniDVRecorder:
             fg="gray"
         ).pack()
 
+        # ========== Codec Info ==========
+        codec_frame = tk.Frame(master)
+        codec_frame.pack(pady=5)
+        
+        tk.Label(
+            codec_frame,
+            text="Codec: ",
+            font=("Arial", 9)
+        ).pack(side=tk.LEFT)
+        
+        tk.Label(
+            codec_frame,
+            text="H.264 (MP4) - universell kompatibel",
+            font=("Arial", 9, "bold"),
+            fg="#1565C0"
+        ).pack(side=tk.LEFT)
+
         # ========== Buttons ==========
         self.start_btn = tk.Button(
             master,
@@ -178,27 +354,114 @@ class MiniDVRecorder:
 
         master.protocol("WM_DELETE_WINDOW", self.close)
 
+    # -------------------------------------------------
+    # Abhängigkeiten prüfen
+    # -------------------------------------------------
+    def _check_dependencies_at_start(self):
+        """Prüft beim Start alle Abhängigkeiten."""
+        def show_progress(text):
+            progress = tk.Toplevel(self.master)
+            progress.title("Installation")
+            progress.geometry("400x100")
+            progress.resizable(False, False)
+            progress.transient(self.master)
+            progress.grab_set()
+            
+            tk.Label(
+                progress,
+                text=text,
+                font=("Arial", 12)
+            ).pack(pady=20)
+            
+            # Progressbar (einfacher Text)
+            tk.Label(
+                progress,
+                text="Bitte warten...",
+                font=("Arial", 10),
+                fg="gray"
+            ).pack()
+            
+            progress.update()
+            return progress
+        
+        # Prüfe auf dvgrab und ffmpeg
+        dvgrab_ok = DependencyManager.check_dependency("dvgrab")
+        ffmpeg_ok = DependencyManager.check_dependency("ffmpeg")
+        
+        if not dvgrab_ok or not ffmpeg_ok:
+            self.dep_status.config(
+                text="⚠️ Einige Abhängigkeiten fehlen",
+                fg="orange"
+            )
+            
+            # Frage ob installiert werden soll
+            success, msg = DependencyManager.ensure_dependencies(
+                self.master,
+                show_progress
+            )
+            
+            if success:
+                self.dep_status.config(
+                    text="✅ Alle Abhängigkeiten: OK",
+                    fg="green"
+                )
+                
+                # Prüfe nochmal ob wirklich installiert
+                if not DependencyManager.check_dependency("dvgrab"):
+                    self.dep_status.config(
+                        text="⚠️ dvgrab nicht gefunden - FireWire nicht verfügbar",
+                        fg="orange"
+                    )
+                if not DependencyManager.check_dependency("ffmpeg"):
+                    self.dep_status.config(
+                        text="⚠️ ffmpeg nicht gefunden - USB nicht verfügbar",
+                        fg="orange"
+                    )
+            else:
+                self.dep_status.config(
+                    text="⚠️ Abhängigkeiten fehlen - einige Funktionen nicht verfügbar",
+                    fg="red"
+                )
+        else:
+            self.dep_status.config(
+                text="✅ Alle Abhängigkeiten: OK",
+                fg="green"
+            )
+
     def on_mode_change(self):
         """Wird aufgerufen, wenn der Modus umgeschaltet wird."""
         self.mode = self.mode_var.get()
         self.update_hint()
-        # Status zurücksetzen
-        self.camera_status.config(text="📹 Bereit", fg="gray")
+        self.camera_status.config(text="📹 Bereit" if self.mode == "firewire" else "🎥 Bereit", fg="gray")
         self.status.config(text="Bereit", fg="green")
+        self.update_default_filename()
 
     def update_hint(self):
         """Aktualisiert den Hinweistext je nach Modus."""
         if self.mode == "firewire":
-            self.hint_label.config(
-                text="MiniDV Camcorder über FireWire (IEEE 1394) anschließen.\n"
-                     "Erfordert 'dvgrab'."
-            )
+            # Prüfe ob dvgrab verfügbar ist
+            if DependencyManager.check_dependency("dvgrab"):
+                self.hint_label.config(
+                    text="MiniDV Camcorder über FireWire (IEEE 1394) anschließen.\n"
+                         "Codec: DV (uncompressed) - wird als .dv-Datei gespeichert"
+                )
+            else:
+                self.hint_label.config(
+                    text="⚠️ dvgrab nicht installiert! FireWire nicht verfügbar.\n"
+                         "Bitte installiere: sudo apt install dvgrab"
+                )
         else:
-            self.hint_label.config(
-                text="Webcam über USB anschließen.\n"
-                     "Erfordert 'ffmpeg' mit Video4Linux2 (V4L2) und ALSA.\n"
-                     "Unterstützt Video + Audio."
-            )
+            # Prüfe ob ffmpeg verfügbar ist
+            if DependencyManager.check_dependency("ffmpeg"):
+                self.hint_label.config(
+                    text="Webcam über USB anschließen.\n"
+                         "Codec: H.264 (MP4) - universell kompatibel"
+                )
+            else:
+                self.hint_label.config(
+                    text="⚠️ ffmpeg nicht installiert! USB nicht verfügbar.\n"
+                         "Bitte installiere: sudo apt install ffmpeg"
+                )
 
     def choose_folder(self):
         folder = filedialog.askdirectory(
@@ -237,11 +500,13 @@ class MiniDVRecorder:
 
     def _start_firewire_recording(self, filename):
         """Startet Aufnahme über FireWire mit dvgrab."""
-        if shutil.which("dvgrab") is None:
+        if not DependencyManager.check_dependency("dvgrab"):
             messagebox.showerror(
                 "Fehler",
                 "Das Programm 'dvgrab' wurde nicht gefunden.\n"
-                "Installiere es mit: sudo apt install dvgrab"
+                "Installiere es mit:\n"
+                "sudo apt install dvgrab\n\n"
+                "Oder verwende den USB-Modus."
             )
             return
 
@@ -273,16 +538,18 @@ class MiniDVRecorder:
 
     def _start_usb_recording(self, filename):
         """Startet Aufnahme über USB mit ffmpeg (Video + Audio)."""
-        if shutil.which("ffmpeg") is None:
+        if not DependencyManager.check_dependency("ffmpeg"):
             messagebox.showerror(
                 "Fehler",
                 "Das Programm 'ffmpeg' wurde nicht gefunden.\n"
-                "Installiere es mit: sudo apt install ffmpeg"
+                "Installiere es mit:\n"
+                "sudo apt install ffmpeg\n\n"
+                "Oder verwende den FireWire-Modus."
             )
             return
 
-        # Dateiname mit .mkv (gutes Containerformat für Webcam)
-        output_file = os.path.join(self.output_dir, filename + ".mkv")
+        # Datei mit .mp4 - universell kompatibel
+        output_file = os.path.join(self.output_dir, filename + ".mp4")
 
         # Prüfe, ob Datei existiert
         if os.path.exists(output_file):
@@ -295,23 +562,30 @@ class MiniDVRecorder:
 
         try:
             # ffmpeg Befehl für Webcam (Video + Audio)
-            # Video: V4L2 (Linux), Audio: ALSA
-            # Hier wird /dev/video0 und /dev/snd/... verwendet
-            # Anpassungen können nötig sein
+            # Universeller H.264 Codec mit MP4 Container
             self.process = subprocess.Popen(
                 [
                     "ffmpeg",
+                    # Video Input
                     "-f", "v4l2",
                     "-framerate", "30",
                     "-video_size", "640x480",
                     "-i", "/dev/video0",
+                    # Audio Input
                     "-f", "alsa",
                     "-i", "default",
+                    # Video Codec: H.264 (sehr universell)
                     "-c:v", "libx264",
-                    "-preset", "ultrafast",
+                    "-preset", "veryfast",
+                    "-crf", "23",
+                    "-profile:v", "baseline",
+                    "-level", "3.0",
+                    # Audio Codec: AAC (universell)
                     "-c:a", "aac",
                     "-b:a", "128k",
+                    # Pixel Format (kompatibel)
                     "-pix_fmt", "yuv420p",
+                    # Overwrite
                     "-y",
                     output_file
                 ],
@@ -379,10 +653,11 @@ class MiniDVRecorder:
         try:
             for line in self.process.stdout:
                 print(line.strip())
-                # ffmpeg gibt viele Infos aus, wir filtern wichtige
                 if "frame=" in line:
-                    # Zeige Framerate/Status
-                    pass
+                    # Zeige Fortschritt im Status
+                    if "fps=" in line:
+                        # Extrahiere Framerate für Status
+                        pass
                 elif "Input #0" in line:
                     self.master.after(0, lambda: self.camera_status.config(
                         text="🎥 Webcam erkannt", fg="green"
