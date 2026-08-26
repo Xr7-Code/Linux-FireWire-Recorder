@@ -180,9 +180,6 @@ class MiniDVRecorder:
         master.geometry("520x650")
         master.resizable(False, False)
 
-        # ========== Prüfe Abhängigkeiten beim Start ==========
-        self._check_dependencies_at_start()
-
         # ========== MODUS-AUSWAHL (ganz oben) ==========
         self.mode_frame = tk.Frame(master)
         self.mode_frame.pack(pady=(15, 5))
@@ -216,11 +213,12 @@ class MiniDVRecorder:
         self.usb_radio.pack(side=tk.LEFT, padx=5)
 
         # ========== Statusleiste für Abhängigkeiten ==========
+        # Wichtig: Hier MUSS dep_status definiert werden, BEVOR wir es verwenden!
         self.dep_status = tk.Label(
             master,
-            text="✅ Abhängigkeiten: OK",
+            text="⏳ Prüfe Abhängigkeiten...",
             font=("Arial", 9),
-            fg="green"
+            fg="orange"
         )
         self.dep_status.pack(pady=(2, 0))
 
@@ -353,6 +351,10 @@ class MiniDVRecorder:
         self.timer_label.pack()
 
         master.protocol("WM_DELETE_WINDOW", self.close)
+        
+        # ========== JETZT Abhängigkeiten prüfen ==========
+        # Nachdem alle UI-Elemente erstellt wurden
+        self.master.after(100, self._check_dependencies_at_start)
 
     # -------------------------------------------------
     # Abhängigkeiten prüfen
