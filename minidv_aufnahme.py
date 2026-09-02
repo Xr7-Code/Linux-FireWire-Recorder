@@ -8,9 +8,14 @@ import threading
 import tkinter as tk
 import sys
 import platform
+import tempfile
+import time
 
 from tkinter import messagebox, filedialog
 from datetime import datetime
+from PIL import Image, ImageTk
+import cv2
+import numpy as np
 
 
 class DependencyManager:
@@ -89,6 +94,16 @@ class DependencyManager:
             missing.append("ffmpeg")
             install_commands.append("ffmpeg")
         
+        # Prüfe Python-Pakete für Vorschau
+        try:
+            import cv2
+            import PIL
+        except ImportError:
+            missing.append("opencv-python")
+            missing.append("Pillow")
+            install_commands.append("python3-opencv")
+            install_commands.append("python3-pil")
+        
         if not missing:
             return True, "Alle Abhängigkeiten sind installiert"
         
@@ -102,7 +117,9 @@ class DependencyManager:
                 f"{', '.join(missing)}\n\n"
                 "Bitte installiere sie manuell:\n"
                 "• dvgrab: https://sourceforge.net/projects/dvgrab/\n"
-                "• ffmpeg: https://ffmpeg.org/download.html\n\n"
+                "• ffmpeg: https://ffmpeg.org/download.html\n"
+                "• opencv-python: pip install opencv-python\n"
+                "• Pillow: pip install Pillow\n\n"
                 "Alternativ mit Chocolatey:\n"
                 "choco install ffmpeg\n"
                 "choco install dvgrab"
@@ -175,9 +192,19 @@ class MiniDVRecorder:
         self.default_output_dir = os.path.expanduser("~/Videos/MiniDV")
         self.output_dir = self.default_output_dir
         os.makedirs(self.output_dir, exist_ok=True)
+        
+        # Vorschau
+        self.preview_running = False
+        self.preview_thread = None
+        self.cap = None
+        self.last_frame = None
+        self.preview_label = None
+        
+        # FPS für Vorschau
+        self.preview_fps = 15
 
-        master.title("MiniDV / Webcam Überspielung")
-        master.geometry("520x650")
+        master.title("MiniDV / Webcam Überspielung mit Vorschau")
+        master.geometry("620x900")
         master.resizable(False, False)
 
         # ========== MODUS-AUSWAHL (ganz oben) ==========
@@ -213,7 +240,6 @@ class MiniDVRecorder:
         self.usb_radio.pack(side=tk.LEFT, padx=5)
 
         # ========== Statusleiste für Abhängigkeiten ==========
-        # Wichtig: Hier MUSS dep_status definiert werden, BEVOR wir es verwenden!
         self.dep_status = tk.Label(
             master,
             text="⏳ Prüfe Abhängigkeiten...",
@@ -248,6 +274,50 @@ class MiniDVRecorder:
         )
         self.hint_label.pack(pady=(0, 5))
         self.update_hint()
+
+        # ========== VORSCHAU (NEU) ==========
+        preview_frame = tk.Frame(master, bd=2, relief="groove")
+        preview_frame.pack(pady=10, padx=10)
+
+        tk.Label(
+            preview_frame,
+            text="📺 Live-Vorschau",
+            font=("Arial", 11, "bold")
+        ).pack(pady=(5, 0))
+
+        # Canvas für Vorschau
+        self.preview_canvas = tk.Canvas(
+            preview_frame,
+            width=480,
+            height=360,
+            bg="black"
+        )
+        self.preview_canvas.pack(padx=10, pady=(5, 10))
+
+        # Vorschau Buttons
+        preview_btn_frame = tk.Frame(preview_frame)
+        preview_btn_frame.pack(pady=(0, 10))
+
+        self.preview_start_btn = tk.Button(
+            preview_btn_frame,
+            text="▶ Vorschau starten",
+            font=("Arial", 10),
+            command=self.start_preview,
+            bg="#2196F3",
+            fg="white"
+        )
+        self.preview_start_btn.pack(side=tk.LEFT, padx=5)
+
+        self.preview_stop_btn = tk.Button(
+            preview_btn_frame,
+            text="■ Vorschau stoppen",
+            font=("Arial", 10),
+            command=self.stop_preview,
+            state="disabled",
+            bg="#C62828",
+            fg="white"
+        )
+        self.preview_stop_btn.pack(side=tk.LEFT, padx=5)
 
         # ========== Speicherort ==========
         self.output_label = tk.Label(
@@ -353,8 +423,117 @@ class MiniDVRecorder:
         master.protocol("WM_DELETE_WINDOW", self.close)
         
         # ========== JETZT Abhängigkeiten prüfen ==========
-        # Nachdem alle UI-Elemente erstellt wurden
         self.master.after(100, self._check_dependencies_at_start)
+
+    # -------------------------------------------------
+    # VORSCHAU FUNKTIONEN
+    # -------------------------------------------------
+    def start_preview(self):
+        """Startet die Live-Vorschau."""
+        if self.preview_running:
+            return
+        
+        # Prüfe ob Kamera verfügbar ist
+        if self.mode == "usb":
+            if not DependencyManager.check_dependency("ffmpeg"):
+                messagebox.showerror(
+                    "Fehler",
+                    "ffmpeg nicht installiert. Bitte zuerst installieren."
+                )
+                return
+            
+            # Versuche Webcam zu öffnen
+            try:
+                self.cap = cv2.VideoCapture(0)
+                if not self.cap.isOpened():
+                    messagebox.showerror("Fehler", "Webcam konnte nicht geöffnet werden.")
+                    return
+            except Exception as e:
+                messagebox.showerror("Fehler", f"Webcam Fehler: {str(e)}")
+                return
+        else:
+            # FireWire - verwende dvgrab mit Vorschau
+            # Für FireWire ist die Vorschau komplexer, wir verwenden eine einfachere Lösung
+            messagebox.showinfo(
+                "Info",
+                "FireWire-Vorschau wird nur bei USB-Webcams unterstützt.\n"
+                "Bitte wechsle zum USB-Modus für Live-Vorschau."
+            )
+            return
+        
+        self.preview_running = True
+        self.preview_start_btn.config(state="disabled")
+        self.preview_stop_btn.config(state="normal")
+        
+        # Starte Vorschau-Thread
+        self.preview_thread = threading.Thread(target=self._preview_loop, daemon=True)
+        self.preview_thread.start()
+        
+        self.status.config(text="📺 Live-Vorschau aktiv", fg="blue")
+        self.camera_status.config(text="🎥 Webcam aktiv", fg="green")
+    
+    def _preview_loop(self):
+        """Hauptschleife für die Vorschau."""
+        while self.preview_running and self.cap and self.cap.isOpened():
+            ret, frame = self.cap.read()
+            if not ret:
+                continue
+            
+            # Konvertiere für Tkinter
+            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            
+            # Skaliere auf Canvas-Größe
+            height, width = frame_rgb.shape[:2]
+            target_width = 480
+            target_height = 360
+            
+            # Skaliere unter Beibehaltung des Seitenverhältnisses
+            scale = min(target_width / width, target_height / height)
+            new_width = int(width * scale)
+            new_height = int(height * scale)
+            
+            resized = cv2.resize(frame_rgb, (new_width, new_height))
+            
+            # Füge schwarze Ränder hinzu, um auf die Canvas-Größe zu kommen
+            canvas_img = np.zeros((target_height, target_width, 3), dtype=np.uint8)
+            x_offset = (target_width - new_width) // 2
+            y_offset = (target_height - new_height) // 2
+            canvas_img[y_offset:y_offset+new_height, x_offset:x_offset+new_width] = resized
+            
+            # Konvertiere zu PIL Image und dann zu Tkinter PhotoImage
+            img = Image.fromarray(canvas_img)
+            img_tk = ImageTk.PhotoImage(img)
+            
+            # Aktualisiere Canvas im Hauptthread
+            self.master.after(0, self._update_preview, img_tk)
+            
+            # FPS begrenzen
+            time.sleep(1.0 / self.preview_fps)
+    
+    def _update_preview(self, img_tk):
+        """Aktualisiert das Vorschau-Canvas im Hauptthread."""
+        if self.preview_running:
+            self.preview_canvas.delete("all")
+            self.preview_canvas.create_image(0, 0, anchor="nw", image=img_tk)
+            self.preview_canvas.image = img_tk  # Referenz halten
+    
+    def stop_preview(self):
+        """Stoppt die Live-Vorschau."""
+        self.preview_running = False
+        
+        if self.cap:
+            self.cap.release()
+            self.cap = None
+        
+        self.preview_start_btn.config(state="normal")
+        self.preview_stop_btn.config(state="disabled")
+        self.preview_canvas.delete("all")
+        
+        self.status.config(text="Bereit", fg="green")
+        self.camera_status.config(
+            text="📹 Bereit" if self.mode == "firewire" else "🎥 Bereit",
+            fg="gray"
+        )
 
     # -------------------------------------------------
     # Abhängigkeiten prüfen
@@ -375,7 +554,6 @@ class MiniDVRecorder:
                 font=("Arial", 12)
             ).pack(pady=20)
             
-            # Progressbar (einfacher Text)
             tk.Label(
                 progress,
                 text="Bitte warten...",
@@ -390,7 +568,15 @@ class MiniDVRecorder:
         dvgrab_ok = DependencyManager.check_dependency("dvgrab")
         ffmpeg_ok = DependencyManager.check_dependency("ffmpeg")
         
-        if not dvgrab_ok or not ffmpeg_ok:
+        # Prüfe Python-Pakete für Vorschau
+        try:
+            import cv2
+            import PIL
+            cv2_ok = True
+        except ImportError:
+            cv2_ok = False
+        
+        if not dvgrab_ok or not ffmpeg_ok or not cv2_ok:
             self.dep_status.config(
                 text="⚠️ Einige Abhängigkeiten fehlen",
                 fg="orange"
@@ -419,6 +605,13 @@ class MiniDVRecorder:
                         text="⚠️ ffmpeg nicht gefunden - USB nicht verfügbar",
                         fg="orange"
                     )
+                try:
+                    import cv2
+                except ImportError:
+                    self.dep_status.config(
+                        text="⚠️ opencv-python nicht installiert - Keine Vorschau",
+                        fg="orange"
+                    )
             else:
                 self.dep_status.config(
                     text="⚠️ Abhängigkeiten fehlen - einige Funktionen nicht verfügbar",
@@ -432,6 +625,10 @@ class MiniDVRecorder:
 
     def on_mode_change(self):
         """Wird aufgerufen, wenn der Modus umgeschaltet wird."""
+        # Stoppe Vorschau wenn läuft
+        if self.preview_running:
+            self.stop_preview()
+        
         self.mode = self.mode_var.get()
         self.update_hint()
         self.camera_status.config(text="📹 Bereit" if self.mode == "firewire" else "🎥 Bereit", fg="gray")
@@ -441,11 +638,11 @@ class MiniDVRecorder:
     def update_hint(self):
         """Aktualisiert den Hinweistext je nach Modus."""
         if self.mode == "firewire":
-            # Prüfe ob dvgrab verfügbar ist
             if DependencyManager.check_dependency("dvgrab"):
                 self.hint_label.config(
                     text="MiniDV Camcorder über FireWire (IEEE 1394) anschließen.\n"
-                         "Codec: DV (uncompressed) - wird als .dv-Datei gespeichert"
+                         "Codec: DV (uncompressed) - wird als .dv-Datei gespeichert\n"
+                         "⚠️ Live-Vorschau nur im USB-Modus verfügbar"
                 )
             else:
                 self.hint_label.config(
@@ -453,11 +650,11 @@ class MiniDVRecorder:
                          "Bitte installiere: sudo apt install dvgrab"
                 )
         else:
-            # Prüfe ob ffmpeg verfügbar ist
             if DependencyManager.check_dependency("ffmpeg"):
                 self.hint_label.config(
                     text="Webcam über USB anschließen.\n"
-                         "Codec: H.264 (MP4) - universell kompatibel"
+                         "Codec: H.264 (MP4) - universell kompatibel\n"
+                         "✅ Live-Vorschau verfügbar"
                 )
             else:
                 self.hint_label.config(
@@ -494,6 +691,10 @@ class MiniDVRecorder:
 
         # Sonderzeichen aus Dateiname entfernen
         filename = filename.replace("/", "_").replace("\\", "_")
+        
+        # Stoppe Vorschau wenn läuft (um Ressourcen zu schonen)
+        if self.preview_running:
+            self.stop_preview()
         
         if self.mode == "firewire":
             self._start_firewire_recording(filename)
@@ -564,7 +765,6 @@ class MiniDVRecorder:
 
         try:
             # ffmpeg Befehl für Webcam (Video + Audio)
-            # Universeller H.264 Codec mit MP4 Container
             self.process = subprocess.Popen(
                 [
                     "ffmpeg",
@@ -576,16 +776,16 @@ class MiniDVRecorder:
                     # Audio Input
                     "-f", "alsa",
                     "-i", "default",
-                    # Video Codec: H.264 (sehr universell)
+                    # Video Codec: H.264
                     "-c:v", "libx264",
                     "-preset", "veryfast",
                     "-crf", "23",
                     "-profile:v", "baseline",
                     "-level", "3.0",
-                    # Audio Codec: AAC (universell)
+                    # Audio Codec: AAC
                     "-c:a", "aac",
                     "-b:a", "128k",
-                    # Pixel Format (kompatibel)
+                    # Pixel Format
                     "-pix_fmt", "yuv420p",
                     # Overwrite
                     "-y",
@@ -618,6 +818,8 @@ class MiniDVRecorder:
             self.folder_btn.config(state="disabled")
             self.firewire_radio.config(state="disabled")
             self.usb_radio.config(state="disabled")
+            self.preview_start_btn.config(state="disabled")
+            self.preview_stop_btn.config(state="disabled")
         else:
             self.start_btn.config(state="normal")
             self.stop_btn.config(state="disabled")
@@ -625,6 +827,8 @@ class MiniDVRecorder:
             self.folder_btn.config(state="normal")
             self.firewire_radio.config(state="normal")
             self.usb_radio.config(state="normal")
+            self.preview_start_btn.config(state="normal")
+            self.preview_stop_btn.config(state="disabled")
 
     # -------------------------------------------------
     # Ausgabe lesen (dvgrab)
@@ -656,10 +860,7 @@ class MiniDVRecorder:
             for line in self.process.stdout:
                 print(line.strip())
                 if "frame=" in line:
-                    # Zeige Fortschritt im Status
-                    if "fps=" in line:
-                        # Extrahiere Framerate für Status
-                        pass
+                    pass
                 elif "Input #0" in line:
                     self.master.after(0, lambda: self.camera_status.config(
                         text="🎥 Webcam erkannt", fg="green"
@@ -706,13 +907,20 @@ class MiniDVRecorder:
         self.reset_timer()
         self._set_recording_state(False)
         self.status.config(text="Bereit", fg="green")
-        self.camera_status.config(text="📹 Bereit" if self.mode == "firewire" else "🎥 Bereit", fg="gray")
+        self.camera_status.config(
+            text="📹 Bereit" if self.mode == "firewire" else "🎥 Bereit",
+            fg="gray"
+        )
         self.update_default_filename()
 
     # -------------------------------------------------
     # Programm schließen
     # -------------------------------------------------
     def close(self):
+        # Stoppe Vorschau
+        if self.preview_running:
+            self.stop_preview()
+        
         if self.process:
             antwort = messagebox.askyesno(
                 "Aufnahme läuft",
