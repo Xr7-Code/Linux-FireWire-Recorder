@@ -13,9 +13,23 @@ import time
 
 from tkinter import messagebox, filedialog
 from datetime import datetime
-from PIL import Image, ImageTk
-import cv2
-import numpy as np
+
+# PIL imports richtig machen
+try:
+    from PIL import Image, ImageTk
+    PIL_AVAILABLE = True
+except ImportError:
+    PIL_AVAILABLE = False
+    print("PIL/Pillow nicht installiert. Vorschau deaktiviert.")
+
+# OpenCV imports
+try:
+    import cv2
+    import numpy as np
+    CV2_AVAILABLE = True
+except ImportError:
+    CV2_AVAILABLE = False
+    print("OpenCV nicht installiert. Vorschau deaktiviert.")
 
 
 class DependencyManager:
@@ -95,14 +109,10 @@ class DependencyManager:
             install_commands.append("ffmpeg")
         
         # Prüfe Python-Pakete für Vorschau
-        try:
-            import cv2
-            import PIL
-        except ImportError:
-            missing.append("opencv-python")
+        if not PIL_AVAILABLE:
             missing.append("Pillow")
-            install_commands.append("python3-opencv")
-            install_commands.append("python3-pil")
+        if not CV2_AVAILABLE:
+            missing.append("opencv-python")
         
         if not missing:
             return True, "Alle Abhängigkeiten sind installiert"
@@ -202,6 +212,9 @@ class MiniDVRecorder:
         
         # FPS für Vorschau
         self.preview_fps = 15
+        
+        # Prüfe ob Vorschau verfügbar ist
+        self.preview_available = PIL_AVAILABLE and CV2_AVAILABLE
 
         master.title("MiniDV / Webcam Überspielung mit Vorschau")
         master.geometry("620x900")
@@ -318,6 +331,22 @@ class MiniDVRecorder:
             fg="white"
         )
         self.preview_stop_btn.pack(side=tk.LEFT, padx=5)
+        
+        # Wenn keine Vorschau verfügbar, deaktiviere Buttons
+        if not self.preview_available:
+            self.preview_start_btn.config(state="disabled", bg="gray")
+            self.preview_start_btn.config(text="⚠️ Vorschau nicht verfügbar")
+            
+            # Zeige Hinweis auf Canvas
+            self.preview_canvas.create_text(
+                240, 180,
+                text="Pillow und/oder OpenCV nicht installiert\n\n"
+                     "Installiere mit:\n"
+                     "pip install opencv-python Pillow",
+                fill="white",
+                font=("Arial", 10),
+                justify="center"
+            )
 
         # ========== Speicherort ==========
         self.output_label = tk.Label(
@@ -433,6 +462,16 @@ class MiniDVRecorder:
         if self.preview_running:
             return
         
+        # Prüfe ob Vorschau verfügbar ist
+        if not self.preview_available:
+            messagebox.showerror(
+                "Fehler",
+                "Vorschau nicht verfügbar.\n\n"
+                "Installiere die fehlenden Pakete:\n"
+                "pip install opencv-python Pillow"
+            )
+            return
+        
         # Prüfe ob Kamera verfügbar ist
         if self.mode == "usb":
             if not DependencyManager.check_dependency("ffmpeg"):
@@ -453,7 +492,6 @@ class MiniDVRecorder:
                 return
         else:
             # FireWire - verwende dvgrab mit Vorschau
-            # Für FireWire ist die Vorschau komplexer, wir verwenden eine einfachere Lösung
             messagebox.showinfo(
                 "Info",
                 "FireWire-Vorschau wird nur bei USB-Webcams unterstützt.\n"
@@ -569,14 +607,10 @@ class MiniDVRecorder:
         ffmpeg_ok = DependencyManager.check_dependency("ffmpeg")
         
         # Prüfe Python-Pakete für Vorschau
-        try:
-            import cv2
-            import PIL
-            cv2_ok = True
-        except ImportError:
-            cv2_ok = False
+        cv2_ok = CV2_AVAILABLE
+        pil_ok = PIL_AVAILABLE
         
-        if not dvgrab_ok or not ffmpeg_ok or not cv2_ok:
+        if not dvgrab_ok or not ffmpeg_ok or not cv2_ok or not pil_ok:
             self.dep_status.config(
                 text="⚠️ Einige Abhängigkeiten fehlen",
                 fg="orange"
@@ -605,11 +639,24 @@ class MiniDVRecorder:
                         text="⚠️ ffmpeg nicht gefunden - USB nicht verfügbar",
                         fg="orange"
                     )
-                try:
-                    import cv2
-                except ImportError:
+                if not CV2_AVAILABLE:
                     self.dep_status.config(
                         text="⚠️ opencv-python nicht installiert - Keine Vorschau",
+                        fg="orange"
+                    )
+                    self.preview_canvas.delete("all")
+                    self.preview_canvas.create_text(
+                        240, 180,
+                        text="OpenCV nicht installiert\n\n"
+                             "Installiere mit:\n"
+                             "pip install opencv-python",
+                        fill="white",
+                        font=("Arial", 10),
+                        justify="center"
+                    )
+                if not PIL_AVAILABLE:
+                    self.dep_status.config(
+                        text="⚠️ Pillow nicht installiert - Keine Vorschau",
                         fg="orange"
                     )
             else:
@@ -827,7 +874,7 @@ class MiniDVRecorder:
             self.folder_btn.config(state="normal")
             self.firewire_radio.config(state="normal")
             self.usb_radio.config(state="normal")
-            self.preview_start_btn.config(state="normal")
+            self.preview_start_btn.config(state="normal" if self.preview_available else "disabled")
             self.preview_stop_btn.config(state="disabled")
 
     # -------------------------------------------------
