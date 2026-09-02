@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-MiniDV Recorder - MIT KORREKTEM IMPORT
+MiniDV Recorder - MIT KOMPATIBLEM PIL IMPORT
 """
 
 import os
@@ -18,40 +18,56 @@ from tkinter import messagebox, filedialog, ttk
 from datetime import datetime
 
 # ============================================================
-# WICHTIG: PIL IMPORTS RICHTIG MACHEN
+# PIL IMPORTS - KOMPATIBEL MIT ALLEN SYSTEMEN
 # ============================================================
 
+PIL_AVAILABLE = False
+Image = None
+ImageTk = None
+
 try:
-    from PIL import Image, ImageTk  # <-- BEIDE MÜSSEN HIER SEIN!
+    # Versuche normalen Import
+    from PIL import Image
+    from PIL import ImageTk
     PIL_AVAILABLE = True
-    print("✅ PIL/ImageTk importiert")
-except ImportError as e:
-    PIL_AVAILABLE = False
-    print(f"❌ PIL Fehler: {e}")
+    print("✅ PIL/ImageTk importiert (normal)")
+except ImportError:
+    try:
+        # Versuche separaten Import (Debian/Ubuntu manchmal)
+        from PIL import Image
+        import PIL.ImageTk as ImageTk
+        PIL_AVAILABLE = True
+        print("✅ PIL/ImageTk importiert (separat)")
+    except ImportError:
+        try:
+            # Fallback: Alte Methode
+            import Image
+            import ImageTk
+            PIL_AVAILABLE = True
+            print("✅ PIL/ImageTk importiert (alt)")
+        except ImportError:
+            print("❌ PIL/ImageTk nicht gefunden!")
+            print("   Installiere: sudo apt install python3-pil.imagetk")
+            print("   Oder: pip install Pillow --break-system-packages")
 
 try:
     import cv2
     import numpy as np
     CV2_AVAILABLE = True
-    print("✅ OpenCV importiert")
-except ImportError as e:
+    print(f"✅ OpenCV: {cv2.__version__}")
+except ImportError:
     CV2_AVAILABLE = False
-    print(f"❌ OpenCV Fehler: {e}")
+    print("❌ OpenCV nicht gefunden")
 
 # ============================================================
-# VORSCHAU FORCIEREN
+# VORSCHAU STATUS
 # ============================================================
 
-# Da wir wissen dass die Pakete installiert sind
-if PIL_AVAILABLE and CV2_AVAILABLE:
-    PREVIEW_AVAILABLE = True
-else:
-    PREVIEW_AVAILABLE = False
-
+PREVIEW_AVAILABLE = PIL_AVAILABLE and CV2_AVAILABLE
 print(f"📺 Vorschau verfügbar: {PREVIEW_AVAILABLE}")
 
 # ============================================================
-# AUTO-INSTALLER (verkürzt)
+# AUTO-INSTALLER
 # ============================================================
 
 class AutoInstaller:
@@ -133,15 +149,15 @@ class AutoInstaller:
         
         if system == "debian":
             success, _, _ = AutoInstaller.run_command(
-                "sudo apt update && sudo apt install -y dvgrab ffmpeg python3-tk python3-dev v4l-utils"
+                "sudo apt update && sudo apt install -y dvgrab ffmpeg python3-tk python3-dev python3-pil.imagetk v4l-utils"
             )
         elif system == "fedora":
             success, _, _ = AutoInstaller.run_command(
-                "sudo dnf install -y dvgrab ffmpeg python3-tkinter python3-devel v4l-utils"
+                "sudo dnf install -y dvgrab ffmpeg python3-tkinter python3-devel python3-pillow v4l-utils"
             )
         elif system == "arch":
             success, _, _ = AutoInstaller.run_command(
-                "sudo pacman -S --noconfirm dvgrab ffmpeg python-tk v4l-utils"
+                "sudo pacman -S --noconfirm dvgrab ffmpeg python-tk python-pillow v4l-utils"
             )
         elif system == "macos":
             if not shutil.which("brew"):
@@ -375,7 +391,7 @@ class MiniDVRecorder:
                 fill="white", font=("Arial", 11), justify="center")
         else:
             self.preview_canvas.create_text(240, 135,
-                text="⚠️ Vorschau nicht verfügbar",
+                text="⚠️ Vorschau nicht verfügbar\n\nInstalliere:\nsudo apt install python3-pil.imagetk",
                 fill="yellow", font=("Arial", 9), justify="center")
         
         pbtn_frame = tk.Frame(preview_frame)
@@ -452,7 +468,8 @@ class MiniDVRecorder:
             return
         
         if not self.preview_available:
-            messagebox.showerror("Fehler", "Vorschau nicht verfügbar!")
+            messagebox.showerror("Fehler", 
+                "Vorschau nicht verfügbar!\n\nInstalliere:\nsudo apt install python3-pil.imagetk")
             return
         
         if self.mode != "usb":
@@ -513,7 +530,7 @@ class MiniDVRecorder:
                 canvas[yo:yo+nh, xo:xo+nw] = resized
                 
                 img = Image.fromarray(canvas)
-                img_tk = ImageTk.PhotoImage(img)  # <-- HIER WIRD ImageTk VERWENDET
+                img_tk = ImageTk.PhotoImage(img)
                 
                 self.master.after(0, self._update_preview, img_tk)
                 
