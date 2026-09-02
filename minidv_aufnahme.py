@@ -61,19 +61,82 @@ class DependencyManager:
             if shutil.which("brew"):
                 return "brew", "brew install"
         elif system == "windows":
-            # Windows - wir geben nur Hinweise
             return "windows", None
         
         return None, None
     
     @staticmethod
-    def install_dependency(package_name, package_manager_cmd):
+    def get_python_package_name(system_package):
+        """Mapped System-Paketnamen zu Python-Paketnamen für pip."""
+        mapping = {
+            "python3-opencv": "opencv-python",
+            "python3-pil": "Pillow",
+            "python3-pil.imagetk": "Pillow",
+            "python3-numpy": "numpy"
+        }
+        return mapping.get(system_package, system_package)
+    
+    @staticmethod
+    def install_with_pip(package_name):
+        """Installiert ein Python-Paket mit pip."""
+        try:
+            # Versuche mit --user flag (keine Admin-Rechte benötigt)
+            cmd = [sys.executable, "-m", "pip", "install", "--user", package_name]
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=120
+            )
+            
+            if result.returncode == 0:
+                return True, "Mit pip installiert"
+            
+            # Falls --user nicht klappt, versuche ohne
+            cmd = [sys.executable, "-m", "pip", "install", package_name]
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=120
+            )
+            
+            if result.returncode == 0:
+                return True, "Mit pip installiert"
+            else:
+                return False, f"pip Fehler: {result.stderr}"
+                
+        except subprocess.TimeoutExpired:
+            return False, "Zeitüberschreitung bei pip Installation"
+        except Exception as e:
+            return False, f"pip Fehler: {str(e)}"
+    
+    @staticmethod
+    def install_dependency(package_name, package_manager_cmd, is_python_package=False):
         """Installiert eine Abhängigkeit."""
+        if is_python_package:
+            # Für Python-Pakete: erst pip versuchen
+            success, msg = DependencyManager.install_with_pip(package_name)
+            if success:
+                return True, msg
+            
+            # Wenn pip fehlschlägt, zeige Hinweis für Systempaket
+            system_pkg = None
+            if package_name == "opencv-python":
+                system_pkg = "python3-opencv"
+            elif package_name == "Pillow":
+                system_pkg = "python3-pil"
+            
+            if system_pkg:
+                return False, f"pip Installation fehlgeschlagen. Versuche: sudo apt install {system_pkg}"
+            else:
+                return False, f"pip Installation fehlgeschlagen. Installiere manuell: pip install {package_name}"
+        
+        # Für Systempakete (dvgrab, ffmpeg)
         if not package_manager_cmd:
             return False, "Kein Paketmanager gefunden"
         
         try:
-            # Für apt brauchen wir das Paket ohne Version
             cmd = package_manager_cmd.split() + [package_name]
             result = subprocess.run(
                 cmd,
@@ -95,65 +158,72 @@ class DependencyManager:
     @staticmethod
     def ensure_dependencies(master, callback=None):
         """Prüft und installiert alle benötigten Abhängigkeiten."""
-        missing = []
+        missing_system = []
+        missing_python = []
         install_commands = []
         
-        # Prüfe dvgrab für FireWire
+        # Prüfe dvgrab für FireWire (Systempaket)
         if not DependencyManager.check_dependency("dvgrab"):
-            missing.append("dvgrab")
-            install_commands.append("dvgrab")
+            missing_system.append("dvgrab")
+            install_commands.append(("dvgrab", False))
         
-        # Prüfe ffmpeg für USB
+        # Prüfe ffmpeg für USB (Systempaket)
         if not DependencyManager.check_dependency("ffmpeg"):
-            missing.append("ffmpeg")
-            install_commands.append("ffmpeg")
+            missing_system.append("ffmpeg")
+            install_commands.append(("ffmpeg", False))
         
         # Prüfe Python-Pakete für Vorschau
         if not PIL_AVAILABLE:
-            missing.append("Pillow")
-        if not CV2_AVAILABLE:
-            missing.append("opencv-python")
+            missing_python.append("Pillow")
+            install_commands.append(("Pillow", True))
         
-        if not missing:
+        if not CV2_AVAILABLE:
+            missing_python.append("opencv-python")
+            install_commands.append(("opencv-python", True))
+        
+        if not missing_system and not missing_python:
             return True, "Alle Abhängigkeiten sind installiert"
         
-        # Finde Paketmanager
+        # Erstelle Nachricht
+        msg = "Folgende Abhängigkeiten werden benötigt:\n\n"
+        
+        if missing_system:
+            msg += "System-Pakete:\n"
+            for pkg in missing_system:
+                msg += f"  • {pkg}\n"
+            msg += "\n"
+        
+        if missing_python:
+            msg += "Python-Pakete (pip):\n"
+            for pkg in missing_python:
+                msg += f"  • {pkg}\n"
+            msg += "\n"
+        
+        # Finde Paketmanager für Systempakete
         pm_name, pm_cmd = DependencyManager.get_package_manager()
         
         if pm_name == "windows":
-            # Windows - nur Hinweis anzeigen
-            msg = (
-                "Folgende Programme werden benötigt:\n\n"
-                f"{', '.join(missing)}\n\n"
-                "Bitte installiere sie manuell:\n"
+            msg += (
+                "Bitte installiere die fehlenden Pakete manuell:\n\n"
+                "System-Pakete:\n"
                 "• dvgrab: https://sourceforge.net/projects/dvgrab/\n"
-                "• ffmpeg: https://ffmpeg.org/download.html\n"
-                "• opencv-python: pip install opencv-python\n"
-                "• Pillow: pip install Pillow\n\n"
+                "• ffmpeg: https://ffmpeg.org/download.html\n\n"
+                "Python-Pakete:\n"
+                "• pip install opencv-python Pillow\n\n"
                 "Alternativ mit Chocolatey:\n"
-                "choco install ffmpeg\n"
-                "choco install dvgrab"
+                "choco install ffmpeg dvgrab"
             )
             messagebox.showwarning("Abhängigkeiten fehlen", msg)
             return False, "Manuelle Installation erforderlich"
         
-        if not pm_cmd:
-            msg = (
-                f"Folgende Programme werden benötigt:\n\n"
-                f"{', '.join(missing)}\n\n"
-                "Bitte installiere sie manuell mit deinem Paketmanager."
-            )
-            messagebox.showwarning("Abhängigkeiten fehlen", msg)
-            return False, "Manuelle Installation erforderlich"
+        # Füge Installationsanweisungen hinzu
+        if missing_system and pm_cmd:
+            msg += f"Für System-Pakete: {pm_cmd} {' '.join(missing_system)}\n\n"
         
-        # Frage ob installiert werden soll
-        pm_display = pm_name.upper()
-        msg = (
-            f"Folgende Programme werden benötigt:\n\n"
-            f"{', '.join(missing)}\n\n"
-            f"Soll {pm_display} die Installation durchführen?\n\n"
-            f"Befehl: {pm_cmd} {' '.join(install_commands)}"
-        )
+        if missing_python:
+            msg += f"Für Python-Pakete: pip install {' '.join(missing_python)}\n\n"
+        
+        msg += "Soll die Installation jetzt versucht werden?"
         
         if not messagebox.askyesno("Abhängigkeiten installieren", msg):
             return False, "Installation abgebrochen"
@@ -166,8 +236,14 @@ class DependencyManager:
         all_success = True
         errors = []
         
-        for pkg in install_commands:
-            success, msg = DependencyManager.install_dependency(pkg, pm_cmd)
+        for pkg, is_python in install_commands:
+            if is_python:
+                success, msg = DependencyManager.install_dependency(
+                    pkg, None, is_python_package=True
+                )
+            else:
+                success, msg = DependencyManager.install_dependency(pkg, pm_cmd)
+            
             if not success:
                 all_success = False
                 errors.append(f"{pkg}: {msg}")
@@ -179,11 +255,17 @@ class DependencyManager:
             messagebox.showinfo("Erfolg", "Alle Abhängigkeiten wurden installiert!")
             return True, "Installation abgeschlossen"
         else:
-            messagebox.showerror(
-                "Installationsfehler",
-                f"Einige Pakete konnten nicht installiert werden:\n\n" + "\n".join(errors) +
-                "\n\nBitte installiere sie manuell."
-            )
+            error_msg = "Einige Pakete konnten nicht installiert werden:\n\n"
+            error_msg += "\n".join(errors)
+            error_msg += "\n\nBitte installiere sie manuell:\n\n"
+            
+            if missing_system and pm_cmd:
+                error_msg += f"System-Pakete: {pm_cmd} {' '.join(missing_system)}\n"
+            
+            if missing_python:
+                error_msg += f"Python-Pakete: pip install {' '.join(missing_python)}"
+            
+            messagebox.showerror("Installationsfehler", error_msg)
             return False, "Installation fehlgeschlagen"
 
 
@@ -288,7 +370,7 @@ class MiniDVRecorder:
         self.hint_label.pack(pady=(0, 5))
         self.update_hint()
 
-        # ========== VORSCHAU (NEU) ==========
+        # ========== VORSCHAU ==========
         preview_frame = tk.Frame(master, bd=2, relief="groove")
         preview_frame.pack(pady=10, padx=10)
 
@@ -342,7 +424,9 @@ class MiniDVRecorder:
                 240, 180,
                 text="Pillow und/oder OpenCV nicht installiert\n\n"
                      "Installiere mit:\n"
-                     "pip install opencv-python Pillow",
+                     "pip install opencv-python Pillow\n\n"
+                     "oder (Debian/Ubuntu):\n"
+                     "sudo apt install python3-opencv python3-pil",
                 fill="white",
                 font=("Arial", 10),
                 justify="center"
@@ -468,7 +552,9 @@ class MiniDVRecorder:
                 "Fehler",
                 "Vorschau nicht verfügbar.\n\n"
                 "Installiere die fehlenden Pakete:\n"
-                "pip install opencv-python Pillow"
+                "pip install opencv-python Pillow\n\n"
+                "oder (Debian/Ubuntu):\n"
+                "sudo apt install python3-opencv python3-pil"
             )
             return
         
@@ -532,7 +618,7 @@ class MiniDVRecorder:
             
             resized = cv2.resize(frame_rgb, (new_width, new_height))
             
-            # Füge schwarze Ränder hinzu, um auf die Canvas-Größe zu kommen
+            # Füge schwarze Ränder hinzu
             canvas_img = np.zeros((target_height, target_width, 3), dtype=np.uint8)
             x_offset = (target_width - new_width) // 2
             y_offset = (target_height - new_height) // 2
@@ -563,7 +649,7 @@ class MiniDVRecorder:
             self.cap.release()
             self.cap = None
         
-        self.preview_start_btn.config(state="normal")
+        self.preview_start_btn.config(state="normal" if self.preview_available else "disabled")
         self.preview_stop_btn.config(state="disabled")
         self.preview_canvas.delete("all")
         
@@ -581,7 +667,7 @@ class MiniDVRecorder:
         def show_progress(text):
             progress = tk.Toplevel(self.master)
             progress.title("Installation")
-            progress.geometry("400x100")
+            progress.geometry("450x120")
             progress.resizable(False, False)
             progress.transient(self.master)
             progress.grab_set()
@@ -649,7 +735,9 @@ class MiniDVRecorder:
                         240, 180,
                         text="OpenCV nicht installiert\n\n"
                              "Installiere mit:\n"
-                             "pip install opencv-python",
+                             "pip install opencv-python\n\n"
+                             "oder (Debian/Ubuntu):\n"
+                             "sudo apt install python3-opencv",
                         fill="white",
                         font=("Arial", 10),
                         justify="center"
@@ -902,88 +990,4 @@ class MiniDVRecorder:
     # -------------------------------------------------
     # Ausgabe lesen (ffmpeg)
     # -------------------------------------------------
-    def _read_ffmpeg_output(self):
-        try:
-            for line in self.process.stdout:
-                print(line.strip())
-                if "frame=" in line:
-                    pass
-                elif "Input #0" in line:
-                    self.master.after(0, lambda: self.camera_status.config(
-                        text="🎥 Webcam erkannt", fg="green"
-                    ))
-        except Exception:
-            pass
-
-    # -------------------------------------------------
-    # Timer
-    # -------------------------------------------------
-    def update_timer(self):
-        if self.timer_running and self.recording_start:
-            elapsed = datetime.now() - self.recording_start
-            total_seconds = int(elapsed.total_seconds())
-            hours = total_seconds // 3600
-            minutes = (total_seconds % 3600) // 60
-            seconds = total_seconds % 60
-            self.timer_label.config(
-                text=f"Aufnahmedauer: {hours:02d}:{minutes:02d}:{seconds:02d}"
-            )
-            self.master.after(1000, self.update_timer)
-
-    def reset_timer(self):
-        self.timer_running = False
-        self.recording_start = None
-        self.timer_label.config(text="Aufnahmedauer: 00:00:00")
-
-    # -------------------------------------------------
-    # Aufnahme stoppen
-    # -------------------------------------------------
-    def stop_recording(self):
-        if not self.process:
-            return
-
-        try:
-            self.process.send_signal(signal.SIGINT)
-            self.process.wait(timeout=10)
-        except subprocess.TimeoutExpired:
-            self.process.kill()
-        except Exception as err:
-            messagebox.showerror("Fehler", f"Fehler beim Beenden:\n\n{err}")
-
-        self.process = None
-        self.reset_timer()
-        self._set_recording_state(False)
-        self.status.config(text="Bereit", fg="green")
-        self.camera_status.config(
-            text="📹 Bereit" if self.mode == "firewire" else "🎥 Bereit",
-            fg="gray"
-        )
-        self.update_default_filename()
-
-    # -------------------------------------------------
-    # Programm schließen
-    # -------------------------------------------------
-    def close(self):
-        # Stoppe Vorschau
-        if self.preview_running:
-            self.stop_preview()
-        
-        if self.process:
-            antwort = messagebox.askyesno(
-                "Aufnahme läuft",
-                "Die Aufnahme läuft noch.\nSoll sie beendet werden?"
-            )
-            if antwort:
-                self.stop_recording()
-            else:
-                return
-        self.master.destroy()
-
-
-# -------------------------------------------------
-# Programmstart
-# -------------------------------------------------
-if __name__ == "__main__":
-    root = tk.Tk()
-    app = MiniDVRecorder(root)
-    root.mainloop()
+    def _read
