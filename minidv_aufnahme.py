@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-MiniDV Recorder - Voll funktionsfähig mit Logitech C930e Support
+MiniDV Recorder - Kompakte Version mit Auto-Installer
 """
 
 import os
@@ -456,30 +456,29 @@ class MiniDVRecorder:
         
         # Webcam initialisieren
         try:
-            # Setze Berechtigungen erneut
+            # Berechtigungen setzen
             self._fix_webcam_permissions()
             
-            # Öffne Webcam mit explizitem Backend
-            self.cap = cv2.VideoCapture(0, cv2.CAP_V4L2)
+            # Öffne Webcam
+            self.cap = cv2.VideoCapture(0)
             
-            if not self.cap.isOpened():
-                # Versuche mit Standard-Backend
-                self.cap = cv2.VideoCapture(0)
-                
             if not self.cap.isOpened():
                 messagebox.showerror("Fehler", 
                     "Webcam konnte nicht geöffnet werden!\n\n"
                     "Prüfe: ls -la /dev/video*\n"
                     "Und: sudo chmod 666 /dev/video0")
                 return
-                
-            # Setze Webcam-Eigenschaften für bessere Kompatibilität
-            self.cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc('M', 'J', 'P', 'G'))
+            
+            # Webcam-Einstellungen
             self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
             self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
             self.cap.set(cv2.CAP_PROP_FPS, 30)
             
-            # Test-Frame lesen
+            # WICHTIG: Puffer leeren (5 Frames überspringen)
+            for _ in range(5):
+                self.cap.read()
+            
+            # Test-Frame
             ret, frame = self.cap.read()
             if not ret or frame is None:
                 self.cap.release()
@@ -512,21 +511,21 @@ class MiniDVRecorder:
                 h, w = frame_rgb.shape[:2]
                 tw, th = 480, 270
                 
-                # Skaliere unter Beibehaltung des Seitenverhältnisses
+                # Skaliere
                 scale = min(tw/w, th/h)
                 nw, nh = int(w*scale), int(h*scale)
                 resized = cv2.resize(frame_rgb, (nw, nh))
                 
-                # Füge schwarze Ränder hinzu
+                # Schwarze Ränder
                 canvas = np.zeros((th, tw, 3), dtype=np.uint8)
                 xo, yo = (tw-nw)//2, (th-nh)//2
                 canvas[yo:yo+nh, xo:xo+nw] = resized
                 
-                # Konvertiere zu PIL Image
+                # Konvertiere zu PIL
                 img = Image.fromarray(canvas)
                 img_tk = ImageTk.PhotoImage(img)
                 
-                # Aktualisiere Canvas im Hauptthread
+                # Aktualisiere Canvas
                 self.master.after(0, self._update_preview, img_tk)
                 
             except Exception as e:
@@ -699,7 +698,6 @@ class MiniDVRecorder:
                     "-f", "v4l2",
                     "-framerate", "30",
                     "-video_size", "640x480",
-                    "-input_format", "mjpeg",
                     "-i", "/dev/video0",
                     "-f", "alsa",
                     "-i", "default",
