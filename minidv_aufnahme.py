@@ -8,13 +8,12 @@ import threading
 import tkinter as tk
 import sys
 import platform
-import tempfile
 import time
 
 from tkinter import messagebox, filedialog
 from datetime import datetime
 
-# PIL imports richtig machen
+# Versuche PIL zu importieren, aber mach es optional
 try:
     from PIL import Image, ImageTk
     PIL_AVAILABLE = True
@@ -22,7 +21,7 @@ except ImportError:
     PIL_AVAILABLE = False
     print("PIL/Pillow nicht installiert. Vorschau deaktiviert.")
 
-# OpenCV imports
+# Versuche OpenCV zu importieren, aber mach es optional
 try:
     import cv2
     import numpy as np
@@ -46,7 +45,6 @@ class DependencyManager:
         system = platform.system().lower()
         
         if system == "linux":
-            # Prüfe verschiedene Paketmanager
             if shutil.which("apt"):
                 return "apt", "sudo apt install -y"
             elif shutil.which("dnf"):
@@ -57,7 +55,7 @@ class DependencyManager:
                 return "pacman", "sudo pacman -S --noconfirm"
             elif shutil.which("zypper"):
                 return "zypper", "sudo zypper install -y"
-        elif system == "darwin":  # macOS
+        elif system == "darwin":
             if shutil.which("brew"):
                 return "brew", "brew install"
         elif system == "windows":
@@ -66,73 +64,8 @@ class DependencyManager:
         return None, None
     
     @staticmethod
-    def get_python_package_name(system_package):
-        """Mapped System-Paketnamen zu Python-Paketnamen für pip."""
-        mapping = {
-            "python3-opencv": "opencv-python",
-            "python3-pil": "Pillow",
-            "python3-pil.imagetk": "Pillow",
-            "python3-numpy": "numpy"
-        }
-        return mapping.get(system_package, system_package)
-    
-    @staticmethod
-    def install_with_pip(package_name):
-        """Installiert ein Python-Paket mit pip."""
-        try:
-            # Versuche mit --user flag (keine Admin-Rechte benötigt)
-            cmd = [sys.executable, "-m", "pip", "install", "--user", package_name]
-            result = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                timeout=120
-            )
-            
-            if result.returncode == 0:
-                return True, "Mit pip installiert"
-            
-            # Falls --user nicht klappt, versuche ohne
-            cmd = [sys.executable, "-m", "pip", "install", package_name]
-            result = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                timeout=120
-            )
-            
-            if result.returncode == 0:
-                return True, "Mit pip installiert"
-            else:
-                return False, f"pip Fehler: {result.stderr}"
-                
-        except subprocess.TimeoutExpired:
-            return False, "Zeitüberschreitung bei pip Installation"
-        except Exception as e:
-            return False, f"pip Fehler: {str(e)}"
-    
-    @staticmethod
-    def install_dependency(package_name, package_manager_cmd, is_python_package=False):
+    def install_dependency(package_name, package_manager_cmd):
         """Installiert eine Abhängigkeit."""
-        if is_python_package:
-            # Für Python-Pakete: erst pip versuchen
-            success, msg = DependencyManager.install_with_pip(package_name)
-            if success:
-                return True, msg
-            
-            # Wenn pip fehlschlägt, zeige Hinweis für Systempaket
-            system_pkg = None
-            if package_name == "opencv-python":
-                system_pkg = "python3-opencv"
-            elif package_name == "Pillow":
-                system_pkg = "python3-pil"
-            
-            if system_pkg:
-                return False, f"pip Installation fehlgeschlagen. Versuche: sudo apt install {system_pkg}"
-            else:
-                return False, f"pip Installation fehlgeschlagen. Installiere manuell: pip install {package_name}"
-        
-        # Für Systempakete (dvgrab, ffmpeg)
         if not package_manager_cmd:
             return False, "Kein Paketmanager gefunden"
         
@@ -158,72 +91,56 @@ class DependencyManager:
     @staticmethod
     def ensure_dependencies(master, callback=None):
         """Prüft und installiert alle benötigten Abhängigkeiten."""
-        missing_system = []
-        missing_python = []
+        missing = []
         install_commands = []
         
-        # Prüfe dvgrab für FireWire (Systempaket)
+        # Prüfe dvgrab für FireWire
         if not DependencyManager.check_dependency("dvgrab"):
-            missing_system.append("dvgrab")
-            install_commands.append(("dvgrab", False))
+            missing.append("dvgrab")
+            install_commands.append("dvgrab")
         
-        # Prüfe ffmpeg für USB (Systempaket)
+        # Prüfe ffmpeg für USB
         if not DependencyManager.check_dependency("ffmpeg"):
-            missing_system.append("ffmpeg")
-            install_commands.append(("ffmpeg", False))
+            missing.append("ffmpeg")
+            install_commands.append("ffmpeg")
         
-        # Prüfe Python-Pakete für Vorschau
-        if not PIL_AVAILABLE:
-            missing_python.append("Pillow")
-            install_commands.append(("Pillow", True))
-        
-        if not CV2_AVAILABLE:
-            missing_python.append("opencv-python")
-            install_commands.append(("opencv-python", True))
-        
-        if not missing_system and not missing_python:
+        if not missing:
             return True, "Alle Abhängigkeiten sind installiert"
         
-        # Erstelle Nachricht
-        msg = "Folgende Abhängigkeiten werden benötigt:\n\n"
-        
-        if missing_system:
-            msg += "System-Pakete:\n"
-            for pkg in missing_system:
-                msg += f"  • {pkg}\n"
-            msg += "\n"
-        
-        if missing_python:
-            msg += "Python-Pakete (pip):\n"
-            for pkg in missing_python:
-                msg += f"  • {pkg}\n"
-            msg += "\n"
-        
-        # Finde Paketmanager für Systempakete
+        # Finde Paketmanager
         pm_name, pm_cmd = DependencyManager.get_package_manager()
         
         if pm_name == "windows":
-            msg += (
-                "Bitte installiere die fehlenden Pakete manuell:\n\n"
-                "System-Pakete:\n"
+            msg = (
+                "Folgende Programme werden benötigt:\n\n"
+                f"{', '.join(missing)}\n\n"
+                "Bitte installiere sie manuell:\n"
                 "• dvgrab: https://sourceforge.net/projects/dvgrab/\n"
                 "• ffmpeg: https://ffmpeg.org/download.html\n\n"
-                "Python-Pakete:\n"
-                "• pip install opencv-python Pillow\n\n"
                 "Alternativ mit Chocolatey:\n"
-                "choco install ffmpeg dvgrab"
+                "choco install ffmpeg\n"
+                "choco install dvgrab"
             )
             messagebox.showwarning("Abhängigkeiten fehlen", msg)
             return False, "Manuelle Installation erforderlich"
         
-        # Füge Installationsanweisungen hinzu
-        if missing_system and pm_cmd:
-            msg += f"Für System-Pakete: {pm_cmd} {' '.join(missing_system)}\n\n"
+        if not pm_cmd:
+            msg = (
+                f"Folgende Programme werden benötigt:\n\n"
+                f"{', '.join(missing)}\n\n"
+                "Bitte installiere sie manuell mit deinem Paketmanager."
+            )
+            messagebox.showwarning("Abhängigkeiten fehlen", msg)
+            return False, "Manuelle Installation erforderlich"
         
-        if missing_python:
-            msg += f"Für Python-Pakete: pip install {' '.join(missing_python)}\n\n"
-        
-        msg += "Soll die Installation jetzt versucht werden?"
+        # Frage ob installiert werden soll
+        pm_display = pm_name.upper()
+        msg = (
+            f"Folgende Programme werden benötigt:\n\n"
+            f"{', '.join(missing)}\n\n"
+            f"Soll {pm_display} die Installation durchführen?\n\n"
+            f"Befehl: {pm_cmd} {' '.join(install_commands)}"
+        )
         
         if not messagebox.askyesno("Abhängigkeiten installieren", msg):
             return False, "Installation abgebrochen"
@@ -236,14 +153,8 @@ class DependencyManager:
         all_success = True
         errors = []
         
-        for pkg, is_python in install_commands:
-            if is_python:
-                success, msg = DependencyManager.install_dependency(
-                    pkg, None, is_python_package=True
-                )
-            else:
-                success, msg = DependencyManager.install_dependency(pkg, pm_cmd)
-            
+        for pkg in install_commands:
+            success, msg = DependencyManager.install_dependency(pkg, pm_cmd)
             if not success:
                 all_success = False
                 errors.append(f"{pkg}: {msg}")
@@ -255,17 +166,11 @@ class DependencyManager:
             messagebox.showinfo("Erfolg", "Alle Abhängigkeiten wurden installiert!")
             return True, "Installation abgeschlossen"
         else:
-            error_msg = "Einige Pakete konnten nicht installiert werden:\n\n"
-            error_msg += "\n".join(errors)
-            error_msg += "\n\nBitte installiere sie manuell:\n\n"
-            
-            if missing_system and pm_cmd:
-                error_msg += f"System-Pakete: {pm_cmd} {' '.join(missing_system)}\n"
-            
-            if missing_python:
-                error_msg += f"Python-Pakete: pip install {' '.join(missing_python)}"
-            
-            messagebox.showerror("Installationsfehler", error_msg)
+            messagebox.showerror(
+                "Installationsfehler",
+                f"Einige Pakete konnten nicht installiert werden:\n\n" + "\n".join(errors) +
+                "\n\nBitte installiere sie manuell."
+            )
             return False, "Installation fehlgeschlagen"
 
 
@@ -289,20 +194,16 @@ class MiniDVRecorder:
         self.preview_running = False
         self.preview_thread = None
         self.cap = None
-        self.last_frame = None
-        self.preview_label = None
-        
-        # FPS für Vorschau
         self.preview_fps = 15
         
         # Prüfe ob Vorschau verfügbar ist
         self.preview_available = PIL_AVAILABLE and CV2_AVAILABLE
 
-        master.title("MiniDV / Webcam Überspielung mit Vorschau")
-        master.geometry("620x900")
+        master.title("MiniDV / Webcam Überspielung")
+        master.geometry("520x700")
         master.resizable(False, False)
 
-        # ========== MODUS-AUSWAHL (ganz oben) ==========
+        # ========== MODUS-AUSWAHL ==========
         self.mode_frame = tk.Frame(master)
         self.mode_frame.pack(pady=(15, 5))
 
@@ -359,7 +260,7 @@ class MiniDVRecorder:
             font=("Arial", 14, "bold")
         ).pack(pady=(10, 5))
 
-        # Hinweis (ändert sich je nach Modus)
+        # Hinweis
         self.hint_label = tk.Label(
             master,
             text="",
@@ -370,24 +271,46 @@ class MiniDVRecorder:
         self.hint_label.pack(pady=(0, 5))
         self.update_hint()
 
-        # ========== VORSCHAU ==========
+        # ========== VORSCHAU (OPTIONAL) ==========
         preview_frame = tk.Frame(master, bd=2, relief="groove")
-        preview_frame.pack(pady=10, padx=10)
+        preview_frame.pack(pady=10, padx=10, fill="x")
 
-        tk.Label(
+        preview_header = tk.Label(
             preview_frame,
-            text="📺 Live-Vorschau",
-            font=("Arial", 11, "bold")
-        ).pack(pady=(5, 0))
+            text="📺 Live-Vorschau (optional)",
+            font=("Arial", 10, "bold")
+        )
+        preview_header.pack(pady=(5, 0))
 
-        # Canvas für Vorschau
+        # Canvas für Vorschau - immer sichtbar, aber nur aktiv wenn verfügbar
         self.preview_canvas = tk.Canvas(
             preview_frame,
             width=480,
-            height=360,
+            height=270,
             bg="black"
         )
         self.preview_canvas.pack(padx=10, pady=(5, 10))
+
+        # Zeige Standardtext im Canvas
+        if self.preview_available:
+            self.preview_canvas.create_text(
+                240, 135,
+                text="🖥️ Vorschau bereit\n\nKlicke auf 'Vorschau starten'",
+                fill="white",
+                font=("Arial", 12),
+                justify="center"
+            )
+        else:
+            self.preview_canvas.create_text(
+                240, 135,
+                text="⚠️ Vorschau nicht verfügbar\n\n"
+                     "Pillow und/oder OpenCV fehlen\n\n"
+                     "Installiere mit:\n"
+                     "pip install opencv-python Pillow",
+                fill="yellow",
+                font=("Arial", 10),
+                justify="center"
+            )
 
         # Vorschau Buttons
         preview_btn_frame = tk.Frame(preview_frame)
@@ -398,8 +321,9 @@ class MiniDVRecorder:
             text="▶ Vorschau starten",
             font=("Arial", 10),
             command=self.start_preview,
-            bg="#2196F3",
-            fg="white"
+            bg="#4CAF50" if self.preview_available else "gray",
+            fg="white",
+            state="normal" if self.preview_available else "disabled"
         )
         self.preview_start_btn.pack(side=tk.LEFT, padx=5)
 
@@ -413,24 +337,6 @@ class MiniDVRecorder:
             fg="white"
         )
         self.preview_stop_btn.pack(side=tk.LEFT, padx=5)
-        
-        # Wenn keine Vorschau verfügbar, deaktiviere Buttons
-        if not self.preview_available:
-            self.preview_start_btn.config(state="disabled", bg="gray")
-            self.preview_start_btn.config(text="⚠️ Vorschau nicht verfügbar")
-            
-            # Zeige Hinweis auf Canvas
-            self.preview_canvas.create_text(
-                240, 180,
-                text="Pillow und/oder OpenCV nicht installiert\n\n"
-                     "Installiere mit:\n"
-                     "pip install opencv-python Pillow\n\n"
-                     "oder (Debian/Ubuntu):\n"
-                     "sudo apt install python3-opencv python3-pil",
-                fill="white",
-                font=("Arial", 10),
-                justify="center"
-            )
 
         # ========== Speicherort ==========
         self.output_label = tk.Label(
@@ -546,43 +452,44 @@ class MiniDVRecorder:
         if self.preview_running:
             return
         
-        # Prüfe ob Vorschau verfügbar ist
         if not self.preview_available:
             messagebox.showerror(
                 "Fehler",
-                "Vorschau nicht verfügbar.\n\n"
-                "Installiere die fehlenden Pakete:\n"
+                "Vorschau nicht verfügbar!\n\n"
+                "Installiere die fehlenden Pakete:\n\n"
                 "pip install opencv-python Pillow\n\n"
                 "oder (Debian/Ubuntu):\n"
-                "sudo apt install python3-opencv python3-pil"
+                "sudo apt install python3-opencv python3-pil\n\n"
+                "oder (Fedora):\n"
+                "sudo dnf install python3-opencv python3-pillow"
             )
             return
         
-        # Prüfe ob Kamera verfügbar ist
-        if self.mode == "usb":
-            if not DependencyManager.check_dependency("ffmpeg"):
-                messagebox.showerror(
-                    "Fehler",
-                    "ffmpeg nicht installiert. Bitte zuerst installieren."
-                )
-                return
-            
-            # Versuche Webcam zu öffnen
-            try:
-                self.cap = cv2.VideoCapture(0)
-                if not self.cap.isOpened():
-                    messagebox.showerror("Fehler", "Webcam konnte nicht geöffnet werden.")
-                    return
-            except Exception as e:
-                messagebox.showerror("Fehler", f"Webcam Fehler: {str(e)}")
-                return
-        else:
-            # FireWire - verwende dvgrab mit Vorschau
+        if self.mode != "usb":
             messagebox.showinfo(
                 "Info",
-                "FireWire-Vorschau wird nur bei USB-Webcams unterstützt.\n"
-                "Bitte wechsle zum USB-Modus für Live-Vorschau."
+                "Live-Vorschau ist nur im USB-Modus verfügbar.\n"
+                "Bitte wechsle zum USB-Modus."
             )
+            return
+        
+        if not DependencyManager.check_dependency("ffmpeg"):
+            messagebox.showerror(
+                "Fehler",
+                "ffmpeg nicht installiert!\n"
+                "Installiere es mit:\n"
+                "sudo apt install ffmpeg"
+            )
+            return
+        
+        # Versuche Webcam zu öffnen
+        try:
+            self.cap = cv2.VideoCapture(0)
+            if not self.cap.isOpened():
+                messagebox.showerror("Fehler", "Webcam konnte nicht geöffnet werden.")
+                return
+        except Exception as e:
+            messagebox.showerror("Fehler", f"Webcam Fehler: {str(e)}")
             return
         
         self.preview_running = True
@@ -603,33 +510,37 @@ class MiniDVRecorder:
             if not ret:
                 continue
             
-            # Konvertiere für Tkinter
-            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            
-            # Skaliere auf Canvas-Größe
-            height, width = frame_rgb.shape[:2]
-            target_width = 480
-            target_height = 360
-            
-            # Skaliere unter Beibehaltung des Seitenverhältnisses
-            scale = min(target_width / width, target_height / height)
-            new_width = int(width * scale)
-            new_height = int(height * scale)
-            
-            resized = cv2.resize(frame_rgb, (new_width, new_height))
-            
-            # Füge schwarze Ränder hinzu
-            canvas_img = np.zeros((target_height, target_width, 3), dtype=np.uint8)
-            x_offset = (target_width - new_width) // 2
-            y_offset = (target_height - new_height) // 2
-            canvas_img[y_offset:y_offset+new_height, x_offset:x_offset+new_width] = resized
-            
-            # Konvertiere zu PIL Image und dann zu Tkinter PhotoImage
-            img = Image.fromarray(canvas_img)
-            img_tk = ImageTk.PhotoImage(img)
-            
-            # Aktualisiere Canvas im Hauptthread
-            self.master.after(0, self._update_preview, img_tk)
+            try:
+                # Konvertiere für Tkinter
+                frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                
+                # Skaliere auf Canvas-Größe
+                height, width = frame_rgb.shape[:2]
+                target_width = 480
+                target_height = 270
+                
+                scale = min(target_width / width, target_height / height)
+                new_width = int(width * scale)
+                new_height = int(height * scale)
+                
+                resized = cv2.resize(frame_rgb, (new_width, new_height))
+                
+                # Füge schwarze Ränder hinzu
+                canvas_img = np.zeros((target_height, target_width, 3), dtype=np.uint8)
+                x_offset = (target_width - new_width) // 2
+                y_offset = (target_height - new_height) // 2
+                canvas_img[y_offset:y_offset+new_height, x_offset:x_offset+new_width] = resized
+                
+                # Konvertiere zu PIL Image und dann zu Tkinter PhotoImage
+                img = Image.fromarray(canvas_img)
+                img_tk = ImageTk.PhotoImage(img)
+                
+                # Aktualisiere Canvas im Hauptthread
+                self.master.after(0, self._update_preview, img_tk)
+                
+            except Exception as e:
+                print(f"Vorschau Fehler: {e}")
+                break
             
             # FPS begrenzen
             time.sleep(1.0 / self.preview_fps)
@@ -639,7 +550,7 @@ class MiniDVRecorder:
         if self.preview_running:
             self.preview_canvas.delete("all")
             self.preview_canvas.create_image(0, 0, anchor="nw", image=img_tk)
-            self.preview_canvas.image = img_tk  # Referenz halten
+            self.preview_canvas.image = img_tk
     
     def stop_preview(self):
         """Stoppt die Live-Vorschau."""
@@ -651,7 +562,17 @@ class MiniDVRecorder:
         
         self.preview_start_btn.config(state="normal" if self.preview_available else "disabled")
         self.preview_stop_btn.config(state="disabled")
+        
+        # Zeige Standardtext
         self.preview_canvas.delete("all")
+        if self.preview_available:
+            self.preview_canvas.create_text(
+                240, 135,
+                text="🖥️ Vorschau bereit\n\nKlicke auf 'Vorschau starten'",
+                fill="white",
+                font=("Arial", 12),
+                justify="center"
+            )
         
         self.status.config(text="Bereit", fg="green")
         self.camera_status.config(
@@ -667,7 +588,7 @@ class MiniDVRecorder:
         def show_progress(text):
             progress = tk.Toplevel(self.master)
             progress.title("Installation")
-            progress.geometry("450x120")
+            progress.geometry("400x100")
             progress.resizable(False, False)
             progress.transient(self.master)
             progress.grab_set()
@@ -692,17 +613,12 @@ class MiniDVRecorder:
         dvgrab_ok = DependencyManager.check_dependency("dvgrab")
         ffmpeg_ok = DependencyManager.check_dependency("ffmpeg")
         
-        # Prüfe Python-Pakete für Vorschau
-        cv2_ok = CV2_AVAILABLE
-        pil_ok = PIL_AVAILABLE
-        
-        if not dvgrab_ok or not ffmpeg_ok or not cv2_ok or not pil_ok:
+        if not dvgrab_ok or not ffmpeg_ok:
             self.dep_status.config(
                 text="⚠️ Einige Abhängigkeiten fehlen",
                 fg="orange"
             )
             
-            # Frage ob installiert werden soll
             success, msg = DependencyManager.ensure_dependencies(
                 self.master,
                 show_progress
@@ -710,43 +626,9 @@ class MiniDVRecorder:
             
             if success:
                 self.dep_status.config(
-                    text="✅ Alle Abhängigkeiten: OK",
+                    text="✅ System-Abhängigkeiten: OK",
                     fg="green"
                 )
-                
-                # Prüfe nochmal ob wirklich installiert
-                if not DependencyManager.check_dependency("dvgrab"):
-                    self.dep_status.config(
-                        text="⚠️ dvgrab nicht gefunden - FireWire nicht verfügbar",
-                        fg="orange"
-                    )
-                if not DependencyManager.check_dependency("ffmpeg"):
-                    self.dep_status.config(
-                        text="⚠️ ffmpeg nicht gefunden - USB nicht verfügbar",
-                        fg="orange"
-                    )
-                if not CV2_AVAILABLE:
-                    self.dep_status.config(
-                        text="⚠️ opencv-python nicht installiert - Keine Vorschau",
-                        fg="orange"
-                    )
-                    self.preview_canvas.delete("all")
-                    self.preview_canvas.create_text(
-                        240, 180,
-                        text="OpenCV nicht installiert\n\n"
-                             "Installiere mit:\n"
-                             "pip install opencv-python\n\n"
-                             "oder (Debian/Ubuntu):\n"
-                             "sudo apt install python3-opencv",
-                        fill="white",
-                        font=("Arial", 10),
-                        justify="center"
-                    )
-                if not PIL_AVAILABLE:
-                    self.dep_status.config(
-                        text="⚠️ Pillow nicht installiert - Keine Vorschau",
-                        fg="orange"
-                    )
             else:
                 self.dep_status.config(
                     text="⚠️ Abhängigkeiten fehlen - einige Funktionen nicht verfügbar",
@@ -754,13 +636,19 @@ class MiniDVRecorder:
                 )
         else:
             self.dep_status.config(
-                text="✅ Alle Abhängigkeiten: OK",
+                text="✅ System-Abhängigkeiten: OK",
                 fg="green"
+            )
+        
+        # Zeige Vorschau-Status separat
+        if not self.preview_available:
+            self.dep_status.config(
+                text="✅ System: OK | ⚠️ Vorschau: nicht verfügbar",
+                fg="orange"
             )
 
     def on_mode_change(self):
         """Wird aufgerufen, wenn der Modus umgeschaltet wird."""
-        # Stoppe Vorschau wenn läuft
         if self.preview_running:
             self.stop_preview()
         
@@ -769,6 +657,17 @@ class MiniDVRecorder:
         self.camera_status.config(text="📹 Bereit" if self.mode == "firewire" else "🎥 Bereit", fg="gray")
         self.status.config(text="Bereit", fg="green")
         self.update_default_filename()
+        
+        # Aktualisiere Vorschau-Hinweis
+        if self.mode != "usb" and self.preview_available:
+            self.preview_canvas.delete("all")
+            self.preview_canvas.create_text(
+                240, 135,
+                text="ℹ️ Vorschau nur im USB-Modus verfügbar",
+                fill="white",
+                font=("Arial", 12),
+                justify="center"
+            )
 
     def update_hint(self):
         """Aktualisiert den Hinweistext je nach Modus."""
@@ -776,8 +675,7 @@ class MiniDVRecorder:
             if DependencyManager.check_dependency("dvgrab"):
                 self.hint_label.config(
                     text="MiniDV Camcorder über FireWire (IEEE 1394) anschließen.\n"
-                         "Codec: DV (uncompressed) - wird als .dv-Datei gespeichert\n"
-                         "⚠️ Live-Vorschau nur im USB-Modus verfügbar"
+                         "Codec: DV (uncompressed) - wird als .dv-Datei gespeichert"
                 )
             else:
                 self.hint_label.config(
@@ -788,8 +686,7 @@ class MiniDVRecorder:
             if DependencyManager.check_dependency("ffmpeg"):
                 self.hint_label.config(
                     text="Webcam über USB anschließen.\n"
-                         "Codec: H.264 (MP4) - universell kompatibel\n"
-                         "✅ Live-Vorschau verfügbar"
+                         "Codec: H.264 (MP4) - universell kompatibel"
                 )
             else:
                 self.hint_label.config(
@@ -824,10 +721,8 @@ class MiniDVRecorder:
             messagebox.showerror("Fehler", "Bitte einen Dateinamen eingeben.")
             return
 
-        # Sonderzeichen aus Dateiname entfernen
         filename = filename.replace("/", "_").replace("\\", "_")
         
-        # Stoppe Vorschau wenn läuft (um Ressourcen zu schonen)
         if self.preview_running:
             self.stop_preview()
         
@@ -886,10 +781,8 @@ class MiniDVRecorder:
             )
             return
 
-        # Datei mit .mp4 - universell kompatibel
         output_file = os.path.join(self.output_dir, filename + ".mp4")
 
-        # Prüfe, ob Datei existiert
         if os.path.exists(output_file):
             if not messagebox.askyesno(
                 "Datei existiert",
@@ -899,30 +792,23 @@ class MiniDVRecorder:
                 return
 
         try:
-            # ffmpeg Befehl für Webcam (Video + Audio)
             self.process = subprocess.Popen(
                 [
                     "ffmpeg",
-                    # Video Input
                     "-f", "v4l2",
                     "-framerate", "30",
                     "-video_size", "640x480",
                     "-i", "/dev/video0",
-                    # Audio Input
                     "-f", "alsa",
                     "-i", "default",
-                    # Video Codec: H.264
                     "-c:v", "libx264",
                     "-preset", "veryfast",
                     "-crf", "23",
                     "-profile:v", "baseline",
                     "-level", "3.0",
-                    # Audio Codec: AAC
                     "-c:a", "aac",
                     "-b:a", "128k",
-                    # Pixel Format
                     "-pix_fmt", "yuv420p",
-                    # Overwrite
                     "-y",
                     output_file
                 ],
@@ -966,7 +852,7 @@ class MiniDVRecorder:
             self.preview_stop_btn.config(state="disabled")
 
     # -------------------------------------------------
-    # Ausgabe lesen (dvgrab)
+    # Ausgabe lesen
     # -------------------------------------------------
     def _read_dvgrab_output(self):
         try:
@@ -987,16 +873,11 @@ class MiniDVRecorder:
         except Exception:
             pass
 
-    # -------------------------------------------------
-    # Ausgabe lesen (ffmpeg)
-    # -------------------------------------------------
     def _read_ffmpeg_output(self):
         try:
             for line in self.process.stdout:
                 print(line.strip())
-                if "frame=" in line:
-                    pass
-                elif "Input #0" in line:
+                if "Input #0" in line:
                     self.master.after(0, lambda: self.camera_status.config(
                         text="🎥 Webcam erkannt", fg="green"
                     ))
@@ -1052,7 +933,6 @@ class MiniDVRecorder:
     # Programm schließen
     # -------------------------------------------------
     def close(self):
-        # Stoppe Vorschau
         if self.preview_running:
             self.stop_preview()
         
