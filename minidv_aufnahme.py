@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-MiniDV Recorder - MIT FORCIERTER VORSCHAU
+MiniDV Recorder - MIT KORREKTEM IMPORT
 """
 
 import os
@@ -18,40 +18,40 @@ from tkinter import messagebox, filedialog, ttk
 from datetime import datetime
 
 # ============================================================
-# PAKETE IMPORTIEREN
+# WICHTIG: PIL IMPORTS RICHTIG MACHEN
 # ============================================================
 
 try:
-    from PIL import Image, ImageTk
+    from PIL import Image, ImageTk  # <-- BEIDE MÜSSEN HIER SEIN!
     PIL_AVAILABLE = True
-except ImportError:
+    print("✅ PIL/ImageTk importiert")
+except ImportError as e:
     PIL_AVAILABLE = False
+    print(f"❌ PIL Fehler: {e}")
 
 try:
     import cv2
     import numpy as np
     CV2_AVAILABLE = True
-except ImportError:
+    print("✅ OpenCV importiert")
+except ImportError as e:
     CV2_AVAILABLE = False
+    print(f"❌ OpenCV Fehler: {e}")
 
 # ============================================================
-# VORSCHAU FORCIEREN - WIR WISSEN DASS ES FUNKTIONIERT!
+# VORSCHAU FORCIEREN
 # ============================================================
 
-# Da wir wissen dass beide Pakete installiert sind, setzen wir die Variablen MANUELL
-PIL_AVAILABLE = True
-CV2_AVAILABLE = True
-PREVIEW_AVAILABLE = True
+# Da wir wissen dass die Pakete installiert sind
+if PIL_AVAILABLE and CV2_AVAILABLE:
+    PREVIEW_AVAILABLE = True
+else:
+    PREVIEW_AVAILABLE = False
 
-print("=" * 50)
-print("📺 VORSCHAU STATUS:")
-print(f"   PIL: {PIL_AVAILABLE}")
-print(f"   OpenCV: {CV2_AVAILABLE}")
-print(f"   Vorschau: {PREVIEW_AVAILABLE}")
-print("=" * 50)
+print(f"📺 Vorschau verfügbar: {PREVIEW_AVAILABLE}")
 
 # ============================================================
-# AUTO-INSTALLER
+# AUTO-INSTALLER (verkürzt)
 # ============================================================
 
 class AutoInstaller:
@@ -304,8 +304,8 @@ class MiniDVRecorder:
         self.cap = None
         self.preview_fps = 15
         
-        # VORSCHAU FORCIERT AKTIVIEREN
-        self.preview_available = True  # <--- MANUELL AUF TRUE GESETZT!
+        # VORSCHAU VERFÜGBAR
+        self.preview_available = PREVIEW_AVAILABLE
         print(f"📺 Vorschau im Programm: {self.preview_available}")
 
         os.environ['TERM'] = 'xterm-256color'
@@ -369,18 +369,22 @@ class MiniDVRecorder:
         self.preview_canvas = tk.Canvas(preview_frame, width=480, height=270, bg="black")
         self.preview_canvas.pack(pady=5, padx=5)
         
-        # VORSCHAU IST JETZT IMMER VERFÜGBAR
-        self.preview_canvas.create_text(240, 135, 
-            text="🖥️ Vorschau bereit\n\nKlicke auf 'Vorschau starten'",
-            fill="white", font=("Arial", 11), justify="center")
+        if self.preview_available:
+            self.preview_canvas.create_text(240, 135, 
+                text="🖥️ Vorschau bereit\n\nKlicke auf 'Vorschau starten'",
+                fill="white", font=("Arial", 11), justify="center")
+        else:
+            self.preview_canvas.create_text(240, 135,
+                text="⚠️ Vorschau nicht verfügbar",
+                fill="yellow", font=("Arial", 9), justify="center")
         
         pbtn_frame = tk.Frame(preview_frame)
         pbtn_frame.pack(pady=(0, 5))
         
         self.preview_start_btn = tk.Button(pbtn_frame, text="▶ Vorschau starten", width=14,
             font=("Arial", 9), command=self.start_preview,
-            bg="#4CAF50", fg="white",
-            state="normal")  # <--- IMMER AKTIV
+            bg="#4CAF50" if self.preview_available else "gray", fg="white",
+            state="normal" if self.preview_available else "disabled")
         self.preview_start_btn.pack(side=tk.LEFT, padx=3)
         
         self.preview_stop_btn = tk.Button(pbtn_frame, text="■ Vorschau stoppen", width=14,
@@ -447,6 +451,10 @@ class MiniDVRecorder:
         if self.preview_running:
             return
         
+        if not self.preview_available:
+            messagebox.showerror("Fehler", "Vorschau nicht verfügbar!")
+            return
+        
         if self.mode != "usb":
             messagebox.showinfo("Info", "Vorschau nur im USB-Modus verfügbar")
             return
@@ -505,7 +513,7 @@ class MiniDVRecorder:
                 canvas[yo:yo+nh, xo:xo+nw] = resized
                 
                 img = Image.fromarray(canvas)
-                img_tk = ImageTk.PhotoImage(img)
+                img_tk = ImageTk.PhotoImage(img)  # <-- HIER WIRD ImageTk VERWENDET
                 
                 self.master.after(0, self._update_preview, img_tk)
                 
@@ -526,12 +534,13 @@ class MiniDVRecorder:
         if self.cap:
             self.cap.release()
             self.cap = None
-        self.preview_start_btn.config(state="normal")
+        self.preview_start_btn.config(state="normal" if self.preview_available else "disabled")
         self.preview_stop_btn.config(state="disabled")
         self.preview_canvas.delete("all")
-        self.preview_canvas.create_text(240, 135,
-            text="🖥️ Vorschau bereit\n\nKlicke auf 'Vorschau starten'",
-            fill="white", font=("Arial", 11), justify="center")
+        if self.preview_available:
+            self.preview_canvas.create_text(240, 135,
+                text="🖥️ Vorschau bereit\n\nKlicke auf 'Vorschau starten'",
+                fill="white", font=("Arial", 11), justify="center")
         self.status.config(text="Bereit", fg="green")
         self.camera_status.config(text="📹 Bereit" if self.mode == "firewire" else "🎥 Bereit", fg="gray")
     
@@ -576,16 +585,11 @@ class MiniDVRecorder:
         self.update_default_filename()
         self.camera_status.config(text="📹 Bereit" if self.mode == "firewire" else "🎥 Bereit", fg="gray")
         self.status.config(text="Bereit", fg="green")
-        if self.mode != "usb":
+        if self.mode != "usb" and self.preview_available:
             self.preview_canvas.delete("all")
             self.preview_canvas.create_text(240, 135,
                 text="ℹ️ Vorschau nur im USB-Modus",
                 fill="white", font=("Arial", 12))
-        else:
-            self.preview_canvas.delete("all")
-            self.preview_canvas.create_text(240, 135,
-                text="🖥️ Vorschau bereit\n\nKlicke auf 'Vorschau starten'",
-                fill="white", font=("Arial", 11), justify="center")
     
     def update_hint(self):
         if self.mode == "firewire":
@@ -704,7 +708,7 @@ class MiniDVRecorder:
             self.start_btn.config(state="normal")
             self.stop_btn.config(state="disabled")
             self.filename_entry.config(state="normal")
-            self.preview_start_btn.config(state="normal")
+            self.preview_start_btn.config(state="normal" if self.preview_available else "disabled")
             self.preview_stop_btn.config(state="disabled")
     
     def _read_dvgrab_output(self):
