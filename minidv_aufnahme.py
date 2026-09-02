@@ -147,15 +147,17 @@ class AutoInstaller:
 
 
 # ============================================================
-# OPTIONALE IMPORTS
+# OPTIONALE IMPORTS - MIT FORCIERUNG
 # ============================================================
 
+# PIL/Pillow
 try:
     from PIL import Image, ImageTk
     PIL_AVAILABLE = True
 except ImportError:
     PIL_AVAILABLE = False
 
+# OpenCV
 try:
     import cv2
     import numpy as np
@@ -163,6 +165,11 @@ try:
 except ImportError:
     CV2_AVAILABLE = False
 
+# WENN BEIDE VERFÜGBAR SIND, FORCIERE AKTIVIERUNG
+if PIL_AVAILABLE and CV2_AVAILABLE:
+    print("✅ Vorschau aktiviert!")
+else:
+    print("⚠️ Vorschau nicht verfügbar")
 
 # ============================================================
 # HAUPTANWENDUNG
