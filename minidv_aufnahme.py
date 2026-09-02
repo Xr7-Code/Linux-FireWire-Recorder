@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """
-MiniDV Recorder - Kompakte Version mit Auto-Installer
-Alle Funktionen der Originalversion, aber platzsparendes Layout
+MiniDV Recorder - Voll funktionsfähig mit Logitech C930e Support
 """
 
 import os
@@ -15,7 +14,7 @@ import platform
 import time
 import glob
 
-from tkinter import messagebox, filedialog
+from tkinter import messagebox, filedialog, ttk
 from datetime import datetime
 
 # ============================================================
@@ -53,6 +52,22 @@ class AutoInstaller:
             return False, "", "Fehler"
     
     @staticmethod
+    def install_pip_package(pkg):
+        pip_cmd = "pip3" if shutil.which("pip3") else "pip"
+        methods = [
+            f"{pip_cmd} install {pkg} --break-system-packages",
+            f"{pip_cmd} install {pkg} --user",
+            f"python3 -m pip install {pkg} --break-system-packages",
+            f"python3 -m pip install {pkg} --user",
+            f"sudo {pip_cmd} install {pkg}",
+        ]
+        for method in methods:
+            success, _, _ = AutoInstaller.run_command(method)
+            if success:
+                return True
+        return False
+    
+    @staticmethod
     def check_dependencies():
         checks = {
             "dvgrab": shutil.which("dvgrab") is not None,
@@ -85,15 +100,15 @@ class AutoInstaller:
         
         if system == "debian":
             success, _, _ = AutoInstaller.run_command(
-                "sudo apt update && sudo apt install -y dvgrab ffmpeg python3-tk python3-dev"
+                "sudo apt update && sudo apt install -y dvgrab ffmpeg python3-tk python3-dev v4l-utils"
             )
         elif system == "fedora":
             success, _, _ = AutoInstaller.run_command(
-                "sudo dnf install -y dvgrab ffmpeg python3-tkinter python3-devel"
+                "sudo dnf install -y dvgrab ffmpeg python3-tkinter python3-devel v4l-utils"
             )
         elif system == "arch":
             success, _, _ = AutoInstaller.run_command(
-                "sudo pacman -S --noconfirm dvgrab ffmpeg python-tk"
+                "sudo pacman -S --noconfirm dvgrab ffmpeg python-tk v4l-utils"
             )
         elif system == "macos":
             if not shutil.which("brew"):
@@ -105,16 +120,9 @@ class AutoInstaller:
         if progress_callback:
             progress_callback("📦 Installiere Python-Pakete...", 60)
         
-        pip_cmd = "pip3" if shutil.which("pip3") else "pip"
         for pkg in ["opencv-python", "Pillow", "numpy"]:
-            for method in [
-                f"{pip_cmd} install {pkg} --break-system-packages",
-                f"{pip_cmd} install {pkg} --user",
-                f"sudo {pip_cmd} install {pkg}"
-            ]:
-                success, _, _ = AutoInstaller.run_command(method)
-                if success:
-                    break
+            if not AutoInstaller.install_pip_package(pkg):
+                return False, f"Konnte {pkg} nicht installieren"
         
         if progress_callback:
             progress_callback("👤 Konfiguriere Berechtigungen...", 80)
@@ -124,6 +132,13 @@ class AutoInstaller:
             AutoInstaller.run_command(f"sudo usermod -a -G video {user}")
             for dev in glob.glob("/dev/video*"):
                 AutoInstaller.run_command(f"sudo chmod 666 {dev}")
+            
+            # udev Regel für dauerhafte Berechtigungen
+            AutoInstaller.run_command(
+                'sudo bash -c \'cat > /etc/udev/rules.d/99-video.rules << EOF\nSUBSYSTEM=="video4linux", GROUP="video", MODE="0666"\nEOF\''
+            )
+            AutoInstaller.run_command("sudo udevadm control --reload-rules")
+            AutoInstaller.run_command("sudo udevadm trigger")
         
         if progress_callback:
             progress_callback("✅ Fertig!", 100)
@@ -280,12 +295,26 @@ class MiniDVRecorder:
         self.preview_fps = 15
         self.preview_available = PIL_AVAILABLE and CV2_AVAILABLE
 
+        # Terminal fix
+        os.environ['TERM'] = 'xterm-256color'
+
         self.master.title("MiniDV Recorder")
-        self.master.geometry("500x620")
+        self.master.geometry("520x650")
         self.master.resizable(False, False)
+        
+        # Berechtigungen für Webcam setzen
+        self._fix_webcam_permissions()
         
         self.setup_ui()
         self.master.after(100, self._check_dependencies_at_start)
+    
+    def _fix_webcam_permissions(self):
+        """Setzt Berechtigungen für Webcam-Devices."""
+        for dev in glob.glob("/dev/video*"):
+            try:
+                os.system(f"sudo chmod 666 {dev} 2>/dev/null")
+            except:
+                pass
     
     def setup_ui(self):
         # ===== OBERER BEREICH =====
@@ -328,15 +357,15 @@ class MiniDVRecorder:
         
         tk.Label(preview_frame, text="📺 Live-Vorschau", font=("Arial", 9, "bold")).pack(pady=(3, 0))
         
-        self.preview_canvas = tk.Canvas(preview_frame, width=460, height=240, bg="black")
+        self.preview_canvas = tk.Canvas(preview_frame, width=480, height=270, bg="black")
         self.preview_canvas.pack(pady=5, padx=5)
         
         if self.preview_available:
-            self.preview_canvas.create_text(230, 120, 
+            self.preview_canvas.create_text(240, 135, 
                 text="🖥️ Vorschau bereit\n\nKlicke auf 'Vorschau starten'",
                 fill="white", font=("Arial", 11), justify="center")
         else:
-            self.preview_canvas.create_text(230, 120,
+            self.preview_canvas.create_text(240, 135,
                 text="⚠️ Vorschau nicht verfügbar\n\nInstalliere:\npip install opencv-python Pillow",
                 fill="yellow", font=("Arial", 9), justify="center")
         
@@ -425,11 +454,40 @@ class MiniDVRecorder:
             messagebox.showinfo("Info", "Vorschau nur im USB-Modus verfügbar")
             return
         
+        # Webcam initialisieren
         try:
-            self.cap = cv2.VideoCapture(0)
+            # Setze Berechtigungen erneut
+            self._fix_webcam_permissions()
+            
+            # Öffne Webcam mit explizitem Backend
+            self.cap = cv2.VideoCapture(0, cv2.CAP_V4L2)
+            
             if not self.cap.isOpened():
-                messagebox.showerror("Fehler", "Webcam konnte nicht geöffnet werden")
+                # Versuche mit Standard-Backend
+                self.cap = cv2.VideoCapture(0)
+                
+            if not self.cap.isOpened():
+                messagebox.showerror("Fehler", 
+                    "Webcam konnte nicht geöffnet werden!\n\n"
+                    "Prüfe: ls -la /dev/video*\n"
+                    "Und: sudo chmod 666 /dev/video0")
                 return
+                
+            # Setze Webcam-Eigenschaften für bessere Kompatibilität
+            self.cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc('M', 'J', 'P', 'G'))
+            self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+            self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+            self.cap.set(cv2.CAP_PROP_FPS, 30)
+            
+            # Test-Frame lesen
+            ret, frame = self.cap.read()
+            if not ret or frame is None:
+                self.cap.release()
+                messagebox.showerror("Fehler", 
+                    "Webcam liefert kein Bild!\n\n"
+                    "Teste mit: ffplay /dev/video0")
+                return
+                
         except Exception as e:
             messagebox.showerror("Fehler", f"Webcam Fehler: {str(e)}")
             return
@@ -444,25 +502,38 @@ class MiniDVRecorder:
     
     def _preview_loop(self):
         while self.preview_running and self.cap and self.cap.isOpened():
-            ret, frame = self.cap.read()
-            if not ret:
-                continue
             try:
+                ret, frame = self.cap.read()
+                if not ret or frame is None:
+                    continue
+                
+                # Konvertiere für Tkinter
                 frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
                 h, w = frame_rgb.shape[:2]
-                tw, th = 460, 240
+                tw, th = 480, 270
+                
+                # Skaliere unter Beibehaltung des Seitenverhältnisses
                 scale = min(tw/w, th/h)
                 nw, nh = int(w*scale), int(h*scale)
                 resized = cv2.resize(frame_rgb, (nw, nh))
+                
+                # Füge schwarze Ränder hinzu
                 canvas = np.zeros((th, tw, 3), dtype=np.uint8)
                 xo, yo = (tw-nw)//2, (th-nh)//2
                 canvas[yo:yo+nh, xo:xo+nw] = resized
+                
+                # Konvertiere zu PIL Image
                 img = Image.fromarray(canvas)
                 img_tk = ImageTk.PhotoImage(img)
+                
+                # Aktualisiere Canvas im Hauptthread
                 self.master.after(0, self._update_preview, img_tk)
+                
             except Exception as e:
                 print(f"Vorschau Fehler: {e}")
                 break
+            
+            # FPS begrenzen
             time.sleep(1.0 / self.preview_fps)
     
     def _update_preview(self, img_tk):
@@ -480,7 +551,7 @@ class MiniDVRecorder:
         self.preview_stop_btn.config(state="disabled")
         self.preview_canvas.delete("all")
         if self.preview_available:
-            self.preview_canvas.create_text(230, 120,
+            self.preview_canvas.create_text(240, 135,
                 text="🖥️ Vorschau bereit\n\nKlicke auf 'Vorschau starten'",
                 fill="white", font=("Arial", 11), justify="center")
         self.status.config(text="Bereit", fg="green")
@@ -517,6 +588,17 @@ class MiniDVRecorder:
         
         if not self.preview_available:
             self.dep_status.config(text="✅ System: OK | ⚠️ Vorschau: nicht verfügbar", fg="orange")
+        
+        # Prüfe Webcam
+        self._check_webcam()
+    
+    def _check_webcam(self):
+        """Prüft ob die Webcam verfügbar ist."""
+        devices = glob.glob("/dev/video*")
+        if devices:
+            self.camera_status.config(text=f"📷 Webcam gefunden: {', '.join(devices)}", fg="green")
+        else:
+            self.camera_status.config(text="⚠️ Keine Webcam gefunden", fg="orange")
     
     # -------------------------------------------------
     # UI FUNKTIONEN
@@ -531,7 +613,7 @@ class MiniDVRecorder:
         self.status.config(text="Bereit", fg="green")
         if self.mode != "usb" and self.preview_available:
             self.preview_canvas.delete("all")
-            self.preview_canvas.create_text(230, 120,
+            self.preview_canvas.create_text(240, 135,
                 text="ℹ️ Vorschau nur im USB-Modus",
                 fill="white", font=("Arial", 12))
     
@@ -613,11 +695,24 @@ class MiniDVRecorder:
         try:
             self.process = subprocess.Popen(
                 [
-                    "ffmpeg", "-f", "v4l2", "-framerate", "30", "-video_size", "640x480",
-                    "-i", "/dev/video0", "-f", "alsa", "-i", "default",
-                    "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
-                    "-profile:v", "baseline", "-level", "3.0",
-                    "-c:a", "aac", "-b:a", "128k", "-pix_fmt", "yuv420p", "-y", output_file
+                    "ffmpeg",
+                    "-f", "v4l2",
+                    "-framerate", "30",
+                    "-video_size", "640x480",
+                    "-input_format", "mjpeg",
+                    "-i", "/dev/video0",
+                    "-f", "alsa",
+                    "-i", "default",
+                    "-c:v", "libx264",
+                    "-preset", "veryfast",
+                    "-crf", "23",
+                    "-profile:v", "baseline",
+                    "-level", "3.0",
+                    "-c:a", "aac",
+                    "-b:a", "128k",
+                    "-pix_fmt", "yuv420p",
+                    "-y",
+                    output_file
                 ],
                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1
             )
@@ -703,7 +798,7 @@ class MiniDVRecorder:
         self.process = None
         self.reset_timer()
         self._set_recording_state(False)
-        self.status.config(text="Bereit", fg="green")
+        self.status.config(text="✅ Aufnahme beendet", fg="green")
         self.camera_status.config(text="📹 Bereit" if self.mode == "firewire" else "🎥 Bereit", fg="gray")
         self.update_default_filename()
     
@@ -724,6 +819,9 @@ class MiniDVRecorder:
 
 if __name__ == "__main__":
     try:
+        # Terminal fix
+        os.environ['TERM'] = 'xterm-256color'
+        
         root = tk.Tk()
         app = MiniDVRecorder(root)
         root.mainloop()
