@@ -990,4 +990,88 @@ class MiniDVRecorder:
     # -------------------------------------------------
     # Ausgabe lesen (ffmpeg)
     # -------------------------------------------------
-    def _read
+    def _read_ffmpeg_output(self):
+        try:
+            for line in self.process.stdout:
+                print(line.strip())
+                if "frame=" in line:
+                    pass
+                elif "Input #0" in line:
+                    self.master.after(0, lambda: self.camera_status.config(
+                        text="🎥 Webcam erkannt", fg="green"
+                    ))
+        except Exception:
+            pass
+
+    # -------------------------------------------------
+    # Timer
+    # -------------------------------------------------
+    def update_timer(self):
+        if self.timer_running and self.recording_start:
+            elapsed = datetime.now() - self.recording_start
+            total_seconds = int(elapsed.total_seconds())
+            hours = total_seconds // 3600
+            minutes = (total_seconds % 3600) // 60
+            seconds = total_seconds % 60
+            self.timer_label.config(
+                text=f"Aufnahmedauer: {hours:02d}:{minutes:02d}:{seconds:02d}"
+            )
+            self.master.after(1000, self.update_timer)
+
+    def reset_timer(self):
+        self.timer_running = False
+        self.recording_start = None
+        self.timer_label.config(text="Aufnahmedauer: 00:00:00")
+
+    # -------------------------------------------------
+    # Aufnahme stoppen
+    # -------------------------------------------------
+    def stop_recording(self):
+        if not self.process:
+            return
+
+        try:
+            self.process.send_signal(signal.SIGINT)
+            self.process.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            self.process.kill()
+        except Exception as err:
+            messagebox.showerror("Fehler", f"Fehler beim Beenden:\n\n{err}")
+
+        self.process = None
+        self.reset_timer()
+        self._set_recording_state(False)
+        self.status.config(text="Bereit", fg="green")
+        self.camera_status.config(
+            text="📹 Bereit" if self.mode == "firewire" else "🎥 Bereit",
+            fg="gray"
+        )
+        self.update_default_filename()
+
+    # -------------------------------------------------
+    # Programm schließen
+    # -------------------------------------------------
+    def close(self):
+        # Stoppe Vorschau
+        if self.preview_running:
+            self.stop_preview()
+        
+        if self.process:
+            antwort = messagebox.askyesno(
+                "Aufnahme läuft",
+                "Die Aufnahme läuft noch.\nSoll sie beendet werden?"
+            )
+            if antwort:
+                self.stop_recording()
+            else:
+                return
+        self.master.destroy()
+
+
+# -------------------------------------------------
+# Programmstart
+# -------------------------------------------------
+if __name__ == "__main__":
+    root = tk.Tk()
+    app = MiniDVRecorder(root)
+    root.mainloop()
