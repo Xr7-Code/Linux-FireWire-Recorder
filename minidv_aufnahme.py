@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-MiniDV Recorder - PRODUKTIONSREIFE VERSION
+MiniDV Recorder - PRODUKTIONSREIFE VERSION MIT KORREKTER SEGMENTIERUNG
 Unterstützt FireWire und USB Webcam Aufnahmen mit stabiler, langer Laufzeit
 """
 
@@ -345,12 +345,14 @@ class MiniDVRecorder:
         self.preview_fps = 15
         self.recording_active = False
         self.current_output_file = None
+        self.segment_thread_running = False
         
         # Segmentierung
         self.segment_duration = 600  # 10 Minuten pro Segment
         self.segment_count = 0
         self.segment_base_name = ""
         self.segment_files = []
+        self.segment_lock = threading.Lock()
         
         # Robustheit
         self.recording_monitor_thread = None
@@ -710,7 +712,7 @@ class MiniDVRecorder:
         self.filename_var.set(f"{ts}_{suffix}")
     
     def start_recording(self):
-        if self.process:
+        if self.process or self.recording_active:
             return
         
         filename = self.filename_var.get().strip()
@@ -727,6 +729,7 @@ class MiniDVRecorder:
         self.segment_base_name = filename
         self.segment_files = []
         self.recording_active = True
+        self.segment_thread_running = True
         
         if self.mode == "firewire":
             self._start_firewire(filename)
@@ -758,85 +761,104 @@ class MiniDVRecorder:
             self.recording_active = False
     
     def _start_usb_segmented(self, filename):
-        if not DependencyManager.check_dependency("ffmpeg"):
-            messagebox.showerror("Fehler", "ffmpeg nicht installiert!\nsudo apt install ffmpeg")
+        """Startet ein neues USB-Aufnahmesegment"""
+        with self.segment_lock:
+            if not self.recording_active:
+                return
+            
+            self.segment_count += 1
+            seg_filename = f"{filename}_seg{self.segment_count:03d}"
+            output_file = os.path.join(self.output_dir, seg_filename + ".mp4")
+            self.current_output_file = output_file
+            self.segment_files.append(output_file)
+            
+            try:
+                print(f"📹 Starte Segment {self.segment_count}: {seg_filename}.mp4")
+                
+                self.process = subprocess.Popen(
+                    [
+                        "ffmpeg",
+                        "-f", "v4l2",
+                        "-framerate", "30",
+                        "-video_size", "640x480",
+                        "-i", "/dev/video0",
+                        "-f", "alsa",
+                        "-i", "default",
+                        "-c:v", "libx264",
+                        "-preset", "veryfast",
+                        "-crf", "23",
+                        "-profile:v", "baseline",
+                        "-level", "3.0",
+                        "-c:a", "aac",
+                        "-b:a", "128k",
+                        "-pix_fmt", "yuv420p",
+                        "-movflags", "+faststart",
+                        "-t", str(self.segment_duration),
+                        "-y",
+                        output_file
+                    ],
+                    stdout=subprocess.PIPE, 
+                    stderr=subprocess.STDOUT, 
+                    text=True, 
+                    bufsize=1
+                )
+                
+                # Starte Thread zum Lesen der Ausgabe
+                threading.Thread(target=self._read_ffmpeg_output, daemon=True).start()
+                
+                # Starte Thread zum Überwachen des Segments
+                threading.Thread(target=self._monitor_segment, daemon=True).start()
+                
+                self._set_recording_state(True)
+                self.status.config(text=f"● USB Aufnahme Segment {self.segment_count}", fg="red")
+                self.camera_status.config(text=f"🎥 Webcam aktiv - Segment {self.segment_count}", fg="green")
+                self.status_detail.config(text=f"📹 Aufnahme: {seg_filename}.mp4")
+                
+            except Exception as e:
+                print(f"❌ Fehler beim Starten von Segment {self.segment_count}: {e}")
+                self.process = None
+                self.recording_active = False
+                self.master.after(0, lambda: messagebox.showerror("Fehler", 
+                    f"Segment {self.segment_count} konnte nicht gestartet werden:\n\n{str(e)}"))
+    
+    def _monitor_segment(self):
+        """Überwacht das aktuelle Segment und startet bei Bedarf das nächste"""
+        if not self.process:
             return
         
-        self.segment_count += 1
-        seg_filename = f"{filename}_seg{self.segment_count:03d}"
-        output_file = os.path.join(self.output_dir, seg_filename + ".mp4")
-        self.current_output_file = output_file
-        self.segment_files.append(output_file)
+        # Warte auf Prozess-Ende
+        self.process.wait()
         
-        try:
-            self.process = subprocess.Popen(
-                [
-                    "ffmpeg",
-                    "-f", "v4l2",
-                    "-framerate", "30",
-                    "-video_size", "640x480",
-                    "-i", "/dev/video0",
-                    "-f", "alsa",
-                    "-i", "default",
-                    "-c:v", "libx264",
-                    "-preset", "veryfast",
-                    "-crf", "23",
-                    "-profile:v", "baseline",
-                    "-level", "3.0",
-                    "-c:a", "aac",
-                    "-b:a", "128k",
-                    "-pix_fmt", "yuv420p",
-                    "-movflags", "+faststart",
-                    "-t", str(self.segment_duration),
-                    "-y",
-                    output_file
-                ],
-                stdout=subprocess.PIPE, 
-                stderr=subprocess.STDOUT, 
-                text=True, 
-                bufsize=1
-            )
-            threading.Thread(target=self._read_ffmpeg_output, daemon=True).start()
-            self._set_recording_state(True)
-            self.status.config(text=f"● USB Aufnahme Segment {self.segment_count}", fg="red")
-            self.camera_status.config(text=f"🎥 Webcam aktiv - Segment {self.segment_count}", fg="green")
-            self.status_detail.config(text=f"📹 Aufnahme: {seg_filename}.mp4")
-            
-            # Überwache den Prozess für automatisches neues Segment
-            threading.Thread(target=self._wait_for_segment_end, daemon=True).start()
-            
-        except Exception as e:
-            messagebox.showerror("Fehler", f"Aufnahme konnte nicht gestartet werden:\n\n{str(e)}")
-            self.process = None
-            self.recording_active = False
-    
-    def _wait_for_segment_end(self):
-        """Wartet auf Ende des aktuellen Segments und startet nächstes"""
-        if self.process:
-            self.process.wait()
-            
-            if self.recording_active:
-                # Prüfe ob Datei gültig ist
-                if self.current_output_file and os.path.exists(self.current_output_file):
-                    size = os.path.getsize(self.current_output_file)
-                    if size > 1000:  # Mindestens 1KB
-                        print(f"✅ Segment {self.segment_count} gespeichert: {size} bytes")
-                    else:
-                        print(f"⚠️ Segment {self.segment_count} zu klein: {size} bytes")
-                
-                self.master.after(100, self._start_next_segment)
+        # Prüfe ob die Aufnahme noch aktiv ist
+        if not self.recording_active:
+            return
+        
+        # Prüfe ob die Datei gültig ist
+        if self.current_output_file and os.path.exists(self.current_output_file):
+            size = os.path.getsize(self.current_output_file)
+            if size > 1000:  # Mindestens 1KB
+                print(f"✅ Segment {self.segment_count} gespeichert: {size/1024/1024:.2f} MB")
+            else:
+                print(f"⚠️ Segment {self.segment_count} zu klein: {size} bytes")
+        
+        # Setze process zurück und starte nächstes Segment
+        self.process = None
+        
+        if self.recording_active:
+            # Kurze Pause bevor nächstes Segment startet
+            time.sleep(0.5)
+            print(f"🔄 Starte nächstes Segment...")
+            self.master.after(0, self._start_next_segment)
     
     def _start_next_segment(self):
-        """Startet das nächste Aufnahmesegment"""
+        """Startet das nächste Aufnahmesegment (wird im Hauptthread ausgeführt)"""
         if self.recording_active and self.process is None:
             self._start_usb_segmented(self.segment_base_name)
     
     def _monitor_recording(self):
         """Überwacht die Aufnahme auf Probleme"""
-        last_check = time.time()
-        
         while self.recording_active:
-            time.sleep(2)
+            time.sleep(5)
             
             # Prüfe auf freien Speicherplatz
             try:
@@ -847,13 +869,6 @@ class MiniDVRecorder:
                     break
             except:
                 pass
-            
-            # Prüfe ob der Prozess noch läuft
-            if self.process and self.process.poll() is not None:
-                if self.recording_active:
-                    print("⚠️ Prozess beendet, starte neu...")
-                    self.master.after(0, self._restart_recording)
-                break
     
     def _handle_low_space(self):
         messagebox.showwarning("Warnung", 
@@ -862,17 +877,12 @@ class MiniDVRecorder:
             "Die Aufnahme wird beendet.")
         self.stop_recording()
     
-    def _restart_recording(self):
-        """Startet Aufnahme neu bei Fehler"""
-        if self.recording_active:
-            self.process = None
-            self._start_next_segment()
-    
     def _set_recording_state(self, is_recording):
         if is_recording:
-            self.recording_start = datetime.now()
-            self.timer_running = True
-            self.update_timer()
+            if not self.recording_start:
+                self.recording_start = datetime.now()
+                self.timer_running = True
+                self.update_timer()
             self.start_btn.config(state="disabled")
             self.stop_btn.config(state="normal")
             self.filename_entry.config(state="disabled")
@@ -920,7 +930,10 @@ class MiniDVRecorder:
                                 frame_num = int(p.split("=")[1])
                                 # Nur alle 100 Frames aktualisieren
                                 if frame_num % 100 == 0:
-                                    progress = (frame_num % 900) / 900 * 100
+                                    # Berechne Fortschritt basierend auf FPS und Dauer
+                                    fps = 30
+                                    max_frames = self.segment_duration * fps
+                                    progress = min(100, (frame_num / max_frames) * 100)
                                     self.master.after(0, lambda p=progress: self.progress_var.set(p))
                                 break
                     except:
@@ -946,13 +959,16 @@ class MiniDVRecorder:
             return
         
         self.recording_active = False
+        self.segment_thread_running = False
         
         if self.process:
             try:
+                print("⏹️ Beende Aufnahme...")
                 self.process.terminate()
                 try:
                     self.process.wait(timeout=10)
                 except subprocess.TimeoutExpired:
+                    print("⚠️ Prozess reagiert nicht, erzwinge Beenden")
                     self.process.kill()
                     self.process.wait()
             except Exception as e:
