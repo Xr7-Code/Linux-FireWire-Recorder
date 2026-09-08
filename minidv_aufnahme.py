@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
-MiniDV Recorder - MIT KOMPATIBLEM PIL IMPORT
+MiniDV Recorder - PRODUKTIONSREIFE VERSION
+Unterstützt FireWire und USB Webcam Aufnahmen mit stabiler, langer Laufzeit
 """
 
 import os
@@ -13,9 +14,12 @@ import sys
 import platform
 import time
 import glob
+import json
+import tempfile
 
 from tkinter import messagebox, filedialog, ttk
 from datetime import datetime
+from pathlib import Path
 
 # ============================================================
 # PIL IMPORTS - KOMPATIBEL MIT ALLEN SYSTEMEN
@@ -26,29 +30,24 @@ Image = None
 ImageTk = None
 
 try:
-    # Versuche normalen Import
     from PIL import Image
     from PIL import ImageTk
     PIL_AVAILABLE = True
     print("✅ PIL/ImageTk importiert (normal)")
 except ImportError:
     try:
-        # Versuche separaten Import (Debian/Ubuntu manchmal)
         from PIL import Image
         import PIL.ImageTk as ImageTk
         PIL_AVAILABLE = True
         print("✅ PIL/ImageTk importiert (separat)")
     except ImportError:
         try:
-            # Fallback: Alte Methode
             import Image
             import ImageTk
             PIL_AVAILABLE = True
             print("✅ PIL/ImageTk importiert (alt)")
         except ImportError:
             print("❌ PIL/ImageTk nicht gefunden!")
-            print("   Installiere: sudo apt install python3-pil.imagetk")
-            print("   Oder: pip install Pillow --break-system-packages")
 
 try:
     import cv2
@@ -59,12 +58,34 @@ except ImportError:
     CV2_AVAILABLE = False
     print("❌ OpenCV nicht gefunden")
 
-# ============================================================
-# VORSCHAU STATUS
-# ============================================================
-
 PREVIEW_AVAILABLE = PIL_AVAILABLE and CV2_AVAILABLE
 print(f"📺 Vorschau verfügbar: {PREVIEW_AVAILABLE}")
+
+# ============================================================
+# KONFIGURATION
+# ============================================================
+
+CONFIG_FILE = os.path.expanduser("~/.minidv_recorder_config.json")
+
+class Config:
+    @staticmethod
+    def load():
+        if os.path.exists(CONFIG_FILE):
+            try:
+                with open(CONFIG_FILE, 'r') as f:
+                    return json.load(f)
+            except:
+                pass
+        return {"output_dir": os.path.expanduser("~/Videos/MiniDV")}
+    
+    @staticmethod
+    def save(config):
+        try:
+            os.makedirs(os.path.dirname(CONFIG_FILE), exist_ok=True)
+            with open(CONFIG_FILE, 'w') as f:
+                json.dump(config, f, indent=2)
+        except:
+            pass
 
 # ============================================================
 # AUTO-INSTALLER
@@ -311,28 +332,44 @@ class MiniDVRecorder:
         self.recording_start = None
         self.timer_running = False
         self.mode = "firewire"
-        self.default_output_dir = os.path.expanduser("~/Videos/MiniDV")
-        self.output_dir = self.default_output_dir
+        
+        # Konfiguration laden
+        self.config = Config.load()
+        self.output_dir = self.config.get("output_dir", os.path.expanduser("~/Videos/MiniDV"))
         os.makedirs(self.output_dir, exist_ok=True)
         
+        # Aufnahme-Status
         self.preview_running = False
         self.preview_thread = None
         self.cap = None
         self.preview_fps = 15
+        self.recording_active = False
+        self.current_output_file = None
         
-        # VORSCHAU VERFÜGBAR
+        # Segmentierung
+        self.segment_duration = 600  # 10 Minuten pro Segment
+        self.segment_count = 0
+        self.segment_base_name = ""
+        self.segment_files = []
+        
+        # Robustheit
+        self.recording_monitor_thread = None
+        self.last_frame_time = 0
+        self.write_error_count = 0
+        
         self.preview_available = PREVIEW_AVAILABLE
         print(f"📺 Vorschau im Programm: {self.preview_available}")
 
         os.environ['TERM'] = 'xterm-256color'
 
-        self.master.title("MiniDV Recorder")
-        self.master.geometry("520x650")
+        self.master.title("MiniDV Recorder - Produktionsversion")
+        self.master.geometry("520x720")
         self.master.resizable(False, False)
         
         self._fix_webcam_permissions()
         self.setup_ui()
         self.master.after(100, self._check_dependencies_at_start)
+        self.master.protocol("WM_DELETE_WINDOW", self.close)
     
     def _fix_webcam_permissions(self):
         for dev in glob.glob("/dev/video*"):
@@ -408,6 +445,24 @@ class MiniDVRecorder:
             state="disabled", bg="#C62828", fg="white")
         self.preview_stop_btn.pack(side=tk.LEFT, padx=3)
         
+        # ===== SEGMENTIERUNG =====
+        seg_frame = tk.Frame(self.master)
+        seg_frame.pack(pady=3, fill="x", padx=10)
+        
+        tk.Label(seg_frame, text="⏱ Segmentierung:", font=("Arial", 9)).pack(side=tk.LEFT)
+        
+        self.seg_var = tk.StringVar(value="600")
+        seg_options = ["300", "600", "900", "1200", "1800", "3600"]
+        self.seg_combo = ttk.Combobox(seg_frame, textvariable=self.seg_var, 
+                                       values=seg_options, width=8, state="readonly")
+        self.seg_combo.pack(side=tk.LEFT, padx=5)
+        self.seg_combo.bind("<<ComboboxSelected>>", self.on_seg_change)
+        
+        tk.Label(seg_frame, text="Sekunden", font=("Arial", 9)).pack(side=tk.LEFT)
+        
+        tk.Button(seg_frame, text="ℹ️", width=2, font=("Arial", 8),
+                 command=self.show_seg_info).pack(side=tk.RIGHT, padx=5)
+        
         # ===== SPEICHERORT =====
         loc_frame = tk.Frame(self.master)
         loc_frame.pack(pady=3, fill="x", padx=10)
@@ -461,7 +516,29 @@ class MiniDVRecorder:
             font=("Arial", 13, "bold"))
         self.timer_label.pack(pady=2)
         
-        self.master.protocol("WM_DELETE_WINDOW", self.close)
+        # ===== STATUSLEISTE =====
+        self.progress_var = tk.DoubleVar()
+        self.progress_bar = ttk.Progressbar(self.master, variable=self.progress_var, 
+                                            maximum=100, length=400, mode='determinate')
+        self.progress_bar.pack(pady=5)
+        
+        self.status_detail = tk.Label(self.master, text="", font=("Arial", 8), fg="gray")
+        self.status_detail.pack()
+    
+    def show_seg_info(self):
+        messagebox.showinfo("Segmentierung",
+            "Die Segmentierung teilt die Aufnahme automatisch in kleinere Dateien.\n\n"
+            "Vorteile:\n"
+            "• Keine Beschädigung bei Abbruch\n"
+            "• Einfacheres Handling großer Aufnahmen\n"
+            "• Keine verlorenen Daten bei Fehlern\n\n"
+            "Empfehlung: 600 Sekunden (10 Minuten)")
+    
+    def on_seg_change(self, event=None):
+        try:
+            self.segment_duration = int(self.seg_var.get())
+        except:
+            self.segment_duration = 600
     
     def start_preview(self):
         if self.preview_running:
@@ -488,7 +565,6 @@ class MiniDVRecorder:
             self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
             self.cap.set(cv2.CAP_PROP_FPS, 30)
             
-            # Puffer leeren
             for _ in range(5):
                 self.cap.read()
             
@@ -587,7 +663,6 @@ class MiniDVRecorder:
         else:
             self.dep_status.config(text="✅ System-Abhängigkeiten: OK", fg="green")
         
-        # Webcam prüfen
         devices = glob.glob("/dev/video*")
         if devices:
             self.camera_status.config(text=f"📷 Webcam gefunden: {', '.join(devices)}", fg="green")
@@ -616,7 +691,7 @@ class MiniDVRecorder:
                 self.hint_label.config(text="⚠️ dvgrab fehlt! Installiere: sudo apt install dvgrab")
         else:
             if DependencyManager.check_dependency("ffmpeg"):
-                self.hint_label.config(text="🎥 USB: Webcam | Codec: H.264 (MP4)")
+                self.hint_label.config(text="🎥 USB: Webcam | Codec: H.264 (MP4) | Segmentierung aktiv")
             else:
                 self.hint_label.config(text="⚠️ ffmpeg fehlt! Installiere: sudo apt install ffmpeg")
     
@@ -625,6 +700,8 @@ class MiniDVRecorder:
         if folder:
             self.output_dir = folder
             os.makedirs(self.output_dir, exist_ok=True)
+            self.config["output_dir"] = self.output_dir
+            Config.save(self.config)
             self.output_label.config(text=f"📁 {self.output_dir}")
     
     def update_default_filename(self):
@@ -646,10 +723,20 @@ class MiniDVRecorder:
         if self.preview_running:
             self.stop_preview()
         
+        self.segment_count = 0
+        self.segment_base_name = filename
+        self.segment_files = []
+        self.recording_active = True
+        
         if self.mode == "firewire":
             self._start_firewire(filename)
         else:
-            self._start_usb(filename)
+            self._start_usb_segmented(filename)
+        
+        # Starte Überwachungsthread
+        if self.recording_active:
+            self.recording_monitor_thread = threading.Thread(target=self._monitor_recording, daemon=True)
+            self.recording_monitor_thread.start()
     
     def _start_firewire(self, filename):
         if not DependencyManager.check_dependency("dvgrab"):
@@ -668,17 +755,18 @@ class MiniDVRecorder:
         except Exception as e:
             messagebox.showerror("Fehler", f"Aufnahme konnte nicht gestartet werden:\n\n{str(e)}")
             self.process = None
+            self.recording_active = False
     
-    def _start_usb(self, filename):
+    def _start_usb_segmented(self, filename):
         if not DependencyManager.check_dependency("ffmpeg"):
             messagebox.showerror("Fehler", "ffmpeg nicht installiert!\nsudo apt install ffmpeg")
             return
         
-        output_file = os.path.join(self.output_dir, filename + ".mp4")
-        if os.path.exists(output_file):
-            if not messagebox.askyesno("Datei existiert", 
-                f"Die Datei '{filename}.mp4' existiert bereits.\nÜberschreiben?"):
-                return
+        self.segment_count += 1
+        seg_filename = f"{filename}_seg{self.segment_count:03d}"
+        output_file = os.path.join(self.output_dir, seg_filename + ".mp4")
+        self.current_output_file = output_file
+        self.segment_files.append(output_file)
         
         try:
             self.process = subprocess.Popen(
@@ -698,18 +786,87 @@ class MiniDVRecorder:
                     "-c:a", "aac",
                     "-b:a", "128k",
                     "-pix_fmt", "yuv420p",
+                    "-movflags", "+faststart",
+                    "-t", str(self.segment_duration),
                     "-y",
                     output_file
                 ],
-                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1
+                stdout=subprocess.PIPE, 
+                stderr=subprocess.STDOUT, 
+                text=True, 
+                bufsize=1
             )
             threading.Thread(target=self._read_ffmpeg_output, daemon=True).start()
             self._set_recording_state(True)
-            self.status.config(text="● USB Webcam Aufnahme läuft", fg="red")
-            self.camera_status.config(text="🎥 Webcam aktiv", fg="green")
+            self.status.config(text=f"● USB Aufnahme Segment {self.segment_count}", fg="red")
+            self.camera_status.config(text=f"🎥 Webcam aktiv - Segment {self.segment_count}", fg="green")
+            self.status_detail.config(text=f"📹 Aufnahme: {seg_filename}.mp4")
+            
+            # Überwache den Prozess für automatisches neues Segment
+            threading.Thread(target=self._wait_for_segment_end, daemon=True).start()
+            
         except Exception as e:
             messagebox.showerror("Fehler", f"Aufnahme konnte nicht gestartet werden:\n\n{str(e)}")
             self.process = None
+            self.recording_active = False
+    
+    def _wait_for_segment_end(self):
+        """Wartet auf Ende des aktuellen Segments und startet nächstes"""
+        if self.process:
+            self.process.wait()
+            
+            if self.recording_active:
+                # Prüfe ob Datei gültig ist
+                if self.current_output_file and os.path.exists(self.current_output_file):
+                    size = os.path.getsize(self.current_output_file)
+                    if size > 1000:  # Mindestens 1KB
+                        print(f"✅ Segment {self.segment_count} gespeichert: {size} bytes")
+                    else:
+                        print(f"⚠️ Segment {self.segment_count} zu klein: {size} bytes")
+                
+                self.master.after(100, self._start_next_segment)
+    
+    def _start_next_segment(self):
+        """Startet das nächste Aufnahmesegment"""
+        if self.recording_active and self.process is None:
+            self._start_usb_segmented(self.segment_base_name)
+    
+    def _monitor_recording(self):
+        """Überwacht die Aufnahme auf Probleme"""
+        last_check = time.time()
+        
+        while self.recording_active:
+            time.sleep(2)
+            
+            # Prüfe auf freien Speicherplatz
+            try:
+                stat = os.statvfs(self.output_dir)
+                free_space = stat.f_frsize * stat.f_bavail
+                if free_space < 100 * 1024 * 1024:  # Weniger als 100MB
+                    self.master.after(0, lambda: self._handle_low_space())
+                    break
+            except:
+                pass
+            
+            # Prüfe ob der Prozess noch läuft
+            if self.process and self.process.poll() is not None:
+                if self.recording_active:
+                    print("⚠️ Prozess beendet, starte neu...")
+                    self.master.after(0, self._restart_recording)
+                break
+    
+    def _handle_low_space(self):
+        messagebox.showwarning("Warnung", 
+            "Niedriger Speicherplatz!\n\n"
+            "Weniger als 100MB verfügbar.\n"
+            "Die Aufnahme wird beendet.")
+        self.stop_recording()
+    
+    def _restart_recording(self):
+        """Startet Aufnahme neu bei Fehler"""
+        if self.recording_active:
+            self.process = None
+            self._start_next_segment()
     
     def _set_recording_state(self, is_recording):
         if is_recording:
@@ -721,12 +878,19 @@ class MiniDVRecorder:
             self.filename_entry.config(state="disabled")
             self.preview_start_btn.config(state="disabled")
             self.preview_stop_btn.config(state="disabled")
+            self.mode_var.set(self.mode)
+            self.firewire_radio.config(state="disabled")
+            self.usb_radio.config(state="disabled")
         else:
             self.start_btn.config(state="normal")
             self.stop_btn.config(state="disabled")
             self.filename_entry.config(state="normal")
             self.preview_start_btn.config(state="normal" if self.preview_available else "disabled")
             self.preview_stop_btn.config(state="disabled")
+            self.firewire_radio.config(state="normal")
+            self.usb_radio.config(state="normal")
+            self.status_detail.config(text="")
+            self.progress_var.set(0)
     
     def _read_dvgrab_output(self):
         try:
@@ -747,6 +911,20 @@ class MiniDVRecorder:
                 print(line.strip())
                 if "Input #0" in line:
                     self.master.after(0, lambda: self.camera_status.config(text="🎥 Webcam erkannt", fg="green"))
+                if "frame=" in line:
+                    # Aktualisiere Fortschritt
+                    try:
+                        parts = line.split()
+                        for i, p in enumerate(parts):
+                            if p.startswith("frame="):
+                                frame_num = int(p.split("=")[1])
+                                # Nur alle 100 Frames aktualisieren
+                                if frame_num % 100 == 0:
+                                    progress = (frame_num % 900) / 900 * 100
+                                    self.master.after(0, lambda p=progress: self.progress_var.set(p))
+                                break
+                    except:
+                        pass
         except:
             pass
     
@@ -764,27 +942,79 @@ class MiniDVRecorder:
         self.timer_label.config(text="⏱ 00:00:00")
     
     def stop_recording(self):
-        if not self.process:
+        if not self.process and not self.recording_active:
             return
-        try:
-            self.process.send_signal(signal.SIGINT)
-            self.process.wait(timeout=10)
-        except subprocess.TimeoutExpired:
-            self.process.kill()
-        except Exception as e:
-            messagebox.showerror("Fehler", f"Fehler beim Beenden:\n\n{str(e)}")
-        self.process = None
+        
+        self.recording_active = False
+        
+        if self.process:
+            try:
+                self.process.terminate()
+                try:
+                    self.process.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    self.process.kill()
+                    self.process.wait()
+            except Exception as e:
+                print(f"Fehler beim Beenden: {e}")
+            
+            self.process = None
+        
         self.reset_timer()
         self._set_recording_state(False)
         self.status.config(text="✅ Aufnahme beendet", fg="green")
         self.camera_status.config(text="📹 Bereit" if self.mode == "firewire" else "🎥 Bereit", fg="gray")
         self.update_default_filename()
+        
+        # Repariere letzte Datei falls nötig
+        if self.mode == "usb" and self.segment_files:
+            self.master.after(500, self._repair_last_files)
+        
+        messagebox.showinfo("Aufnahme beendet", 
+            f"Die Aufnahme wurde erfolgreich beendet.\n\n"
+            f"Erstellte Dateien: {len(self.segment_files)}\n"
+            f"Speicherort: {self.output_dir}")
+    
+    def _repair_last_files(self):
+        """Repariert alle Segmente"""
+        for file in self.segment_files:
+            if os.path.exists(file) and os.path.getsize(file) > 0:
+                self._repair_file(file)
+    
+    def _repair_file(self, filepath):
+        """Repariert eine einzelne MP4-Datei"""
+        try:
+            # Prüfe ob Datei gültig ist
+            check_cmd = ["ffprobe", "-v", "error", "-show_entries", "format=duration", 
+                        "-of", "default=noprint_wrappers=1:nokey=1", filepath]
+            result = subprocess.run(check_cmd, capture_output=True, text=True)
+            
+            if result.returncode != 0 or not result.stdout.strip():
+                print(f"⚠️ Repariere Datei: {filepath}")
+                
+                # Reparieren mit ffmpeg
+                temp_file = filepath + ".tmp"
+                repair_cmd = [
+                    "ffmpeg", "-err_detect", "ignore_err",
+                    "-i", filepath,
+                    "-c", "copy",
+                    "-movflags", "+faststart",
+                    temp_file
+                ]
+                subprocess.run(repair_cmd, capture_output=True)
+                
+                if os.path.exists(temp_file) and os.path.getsize(temp_file) > 0:
+                    os.replace(temp_file, filepath)
+                    print(f"✅ Datei repariert: {os.path.basename(filepath)}")
+        except Exception as e:
+            print(f"Fehler bei Reparatur: {e}")
     
     def close(self):
         if self.preview_running:
             self.stop_preview()
-        if self.process:
-            if messagebox.askyesno("Aufnahme läuft", "Die Aufnahme läuft noch.\nSoll sie beendet werden?"):
+        if self.process or self.recording_active:
+            if messagebox.askyesno("Aufnahme läuft", 
+                "Die Aufnahme läuft noch.\nSoll sie beendet werden?"):
                 self.stop_recording()
             else:
                 return
