@@ -337,12 +337,10 @@ class MiniDVRecorder:
         self.timer_running = False
         self.mode = "firewire"
 
-        # Konfiguration laden
         self.config = Config.load()
         self.output_dir = self.config.get("output_dir", os.path.expanduser("~/Videos/MiniDV"))
         os.makedirs(self.output_dir, exist_ok=True)
 
-        # Aufnahme-Status
         self.preview_running = False
         self.preview_thread = None
         self.cap = None
@@ -351,17 +349,16 @@ class MiniDVRecorder:
         self.current_output_file = None
         self.segment_thread_running = False
 
-        # Segmentierung
         self.segment_duration = 600
         self.segment_count = 0
         self.segment_base_name = ""
         self.segment_files = []
         self.segment_lock = threading.Lock()
 
-        # Robustheit
         self.recording_monitor_thread = None
         self.last_frame_time = 0
         self.write_error_count = 0
+        self.ffmpeg_log_lines = []
 
         self.preview_available = PREVIEW_AVAILABLE
         print(f"📺 Vorschau im Programm: {self.preview_available}")
@@ -385,11 +382,9 @@ class MiniDVRecorder:
                 pass
 
     def setup_ui(self):
-        # ===== HAUPT-CONTAINER (zweispaltig) =====
         main_container = tk.Frame(self.master)
         main_container.pack(fill="both", expand=True, padx=8, pady=6)
 
-        # ----- LINKE SPALTE (Vorschau + Quelle) -----
         left_col = tk.Frame(main_container)
         left_col.pack(side=tk.LEFT, fill="both", expand=True, padx=(0, 6))
 
@@ -452,7 +447,6 @@ class MiniDVRecorder:
             state="disabled", bg="#C62828", fg="white")
         self.preview_stop_btn.pack(side=tk.LEFT, padx=3)
 
-        # ----- RECHTE SPALTE (Einstellungen + Aufnahme) -----
         right_col = tk.Frame(main_container)
         right_col.pack(side=tk.RIGHT, fill="both", padx=(6, 0))
 
@@ -735,6 +729,7 @@ class MiniDVRecorder:
         self.segment_files = []
         self.recording_active = True
         self.segment_thread_running = True
+        self.ffmpeg_log_lines = []
 
         if self.mode == "firewire":
             self._start_firewire(filename)
@@ -760,7 +755,8 @@ class MiniDVRecorder:
             self._set_recording_state(True)
             self.status.config(text="● FireWire Aufnahme läuft", fg="red")
         except Exception as e:
-            messagebox.showerror("Fehler", f"Aufnahme konnte nicht gestartet werden:\n\n{str(e)}")
+            err_msg = str(e)
+            messagebox.showerror("Fehler", f"Aufnahme konnte nicht gestartet werden:\n\n{err_msg}")
             self.process = None
             self.recording_active = False
 
@@ -778,9 +774,11 @@ class MiniDVRecorder:
             has_alsa = os.path.exists("/dev/snd") or shutil.which("arecord") is not None
 
             cmd = [
-                # ---------- Video-Eingang ----------
-                "-thread_queue_size", "1024",   # V4L2-Puffer (Default 8 -> zu klein)
-                "-rtbufsize", "256M",           # Kernel-USB-Puffer
+                "ffmpeg",                               # ← FIX: ffmpeg als Programmname
+                "-hide_banner",
+                "-loglevel", "info",
+                "-thread_queue_size", "1024",
+                "-rtbufsize", "256M",
                 "-f", "v4l2",
                 "-input_format", "mjpeg",
                 "-framerate", "25",
@@ -791,31 +789,26 @@ class MiniDVRecorder:
             ]
 
             if has_alsa:
-                # ---------- Audio-Eingang ----------
                 cmd += [
-                    "-thread_queue_size", "2048",   # ALSA-Puffer -> verhindert 11-Min-Abbruch
+                    "-thread_queue_size", "2048",
                     "-f", "alsa",
                     "-i", "default",
                 ]
 
-            # ---------- Video-Encoding (CPU-schonend) ----------
             cmd += [
                 "-c:v", "libx264",
                 "-preset", "ultrafast",
                 "-tune", "zerolatency",
-                "-crf", "28",                   # etwas weicher -> weniger CPU als 26
-                "-threads", "2",                # alte Hardware: keine Thermal-Throttles
+                "-crf", "28",
+                "-threads", "2",
                 "-g", "50",
                 "-keyint_min", "25",
-                "-force_key_frames",
-                f"expr:gte(t,n_forced*{self.segment_duration})",  # Keyframe pro Segment
             ]
 
             if has_alsa:
-                # ---------- Audio-Encoding ----------
                 cmd += ["-c:a", "aac", "-b:a", "96k"]
 
-            # ---------- Container / Timing / Segmentierung ----------
+            # KEIN -t! Bei -f segment läuft die Aufnahme endlos und rotiert selbst.
             cmd += [
                 "-vsync", "cfr",
                 "-async", "1",
@@ -824,7 +817,9 @@ class MiniDVRecorder:
                 "-fflags", "+genpts",
                 "-f", "segment",
                 "-segment_time", str(self.segment_duration),
+                "-segment_format", "matroska",
                 "-reset_timestamps", "1",
+                "-segment_start_number", "0",
                 "-y",
                 output_pattern,
             ]
@@ -841,20 +836,48 @@ class MiniDVRecorder:
 
             threading.Thread(target=self._read_ffmpeg_output, daemon=True).start()
 
+            self.master.after(5000, self._verify_recording_started)
+
             self._set_recording_state(True)
             self.status.config(text="● USB Aufnahme (FFmpeg-Segmentierung)", fg="red")
             self.camera_status.config(text="🎥 Webcam aktiv - Segmentierung läuft", fg="green")
             self.status_detail.config(text=f"📹 Aufnahme: {filename}_segXXX.mkv")
 
         except Exception as e:
-            print(f"❌ Fehler beim Starten der Aufnahme: {e}")
+            err_msg = str(e)                            # ← FIX: Wert vorher sichern
+            print(f"❌ Fehler beim Starten der Aufnahme: {err_msg}")
             self.process = None
             self.recording_active = False
-            self.master.after(0, lambda: messagebox.showerror("Fehler",
-                f"Aufnahme konnte nicht gestartet werden:\n\n{str(e)}"))
+            self.master.after(0, lambda msg=err_msg: messagebox.showerror(
+                "Fehler", f"Aufnahme konnte nicht gestartet werden:\n\n{msg}"))
+
+    def _verify_recording_started(self):
+        if not self.recording_active:
+            return
+        if self.process is None:
+            return
+        if self.process.poll() is not None:
+            self.recording_active = False
+            self.process = None
+            self._set_recording_state(False)
+            self.status.config(text="❌ Aufnahme fehlgeschlagen", fg="red")
+            log_tail = "\n".join(self.ffmpeg_log_lines[-20:]) if self.ffmpeg_log_lines else "(keine Ausgabe)"
+            messagebox.showerror(
+                "Aufnahme fehlgeschlagen",
+                "FFmpeg hat sich sofort beendet.\n\n"
+                "Letzte Ausgabe:\n" + log_tail
+            )
+            return
+
+        pattern = os.path.join(self.output_dir, f"{self.segment_base_name}_seg*.mkv")
+        files = sorted(glob.glob(pattern))
+        if not files:
+            self.master.after(5000, self._verify_recording_started)
+            return
+
+        print(f"✅ Aufnahme läuft, Datei(en): {files}")
 
     def _monitor_recording(self):
-        """Überwacht die Aufnahme auf Probleme und sammelt Segmentdateien."""
         last_scan = time.time()
 
         while self.recording_active:
@@ -869,7 +892,12 @@ class MiniDVRecorder:
             except:
                 pass
 
-            if time.time() - last_scan > 5:
+            if self.process and self.process.poll() is not None:
+                print("⚠️ FFmpeg unerwartet beendet.")
+                self.master.after(0, self._on_ffmpeg_unexpected_exit)
+                break
+
+            if time.time() - last_scan > 3:
                 last_scan = time.time()
                 pattern = os.path.join(self.output_dir, f"{self.segment_base_name}_seg*.mkv")
                 found = sorted(glob.glob(pattern))
@@ -878,6 +906,19 @@ class MiniDVRecorder:
                         self.segment_files.append(f)
                         self.segment_count = len(self.segment_files)
                         self.master.after(0, lambda c=self.segment_count: self._update_segment_info(c))
+
+    def _on_ffmpeg_unexpected_exit(self):
+        if not self.recording_active:
+            return
+        self.recording_active = False
+        self._set_recording_state(False)
+        self.status.config(text="❌ Aufnahme unerwartet beendet", fg="red")
+        log_tail = "\n".join(self.ffmpeg_log_lines[-15:]) if self.ffmpeg_log_lines else "(keine Ausgabe)"
+        messagebox.showwarning(
+            "Aufnahme beendet",
+            "FFmpeg wurde unerwartet beendet.\n\n"
+            "Letzte Ausgabe:\n" + log_tail
+        )
 
     def _update_segment_info(self, count):
         self.status_detail.config(text=f"📹 {count} Segment(e) aufgezeichnet")
@@ -930,13 +971,20 @@ class MiniDVRecorder:
     def _read_ffmpeg_output(self):
         try:
             for line in self.process.stdout:
-                print(line.strip())
+                line = line.rstrip()
+                if not line:
+                    continue
+                print(line)
+                self.ffmpeg_log_lines.append(line)
+                if len(self.ffmpeg_log_lines) > 100:
+                    self.ffmpeg_log_lines.pop(0)
+
                 if "Input #0" in line:
                     self.master.after(0, lambda: self.camera_status.config(text="🎥 Webcam erkannt", fg="green"))
                 if "frame=" in line:
                     try:
                         parts = line.split()
-                        for i, p in enumerate(parts):
+                        for p in parts:
                             if p.startswith("frame="):
                                 frame_num = int(p.split("=")[1])
                                 if frame_num % 50 == 0:
@@ -973,7 +1021,6 @@ class MiniDVRecorder:
         if self.process:
             try:
                 print("⏹️ Beende Aufnahme...")
-                # SIGINT, damit FFmpeg das MKV sauber finalisiert
                 self.process.send_signal(signal.SIGINT)
                 try:
                     self.process.wait(timeout=10)
@@ -986,6 +1033,8 @@ class MiniDVRecorder:
 
             self.process = None
 
+        time.sleep(1)
+
         self.reset_timer()
         self._set_recording_state(False)
         self.status.config(text="✅ Aufnahme beendet", fg="green")
@@ -996,6 +1045,7 @@ class MiniDVRecorder:
             pattern = os.path.join(self.output_dir, f"{self.segment_base_name}_seg*.mkv")
             found = sorted(glob.glob(pattern))
             self.segment_files = found
+            print(f"📁 Segmente nach Stop: {found}")
 
         messagebox.showinfo("Aufnahme beendet",
             f"Die Aufnahme wurde erfolgreich beendet.\n\n"
