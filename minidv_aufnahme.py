@@ -17,14 +17,12 @@ import platform
 import time
 import glob
 import json
-import tempfile
 
 from tkinter import messagebox, filedialog, ttk
 from datetime import datetime
-from pathlib import Path
 
 # ============================================================
-# PIL IMPORTS - KOMPATIBEL MIT ALLEN SYSTEMEN
+# PIL IMPORTS
 # ============================================================
 
 PIL_AVAILABLE = False
@@ -92,6 +90,36 @@ class Config:
 
 
 # ============================================================
+# HILFSFUNKTIONEN
+# ============================================================
+
+def find_video_device() -> str | None:
+    """Sucht das erste verfügbare V4L2-Gerät."""
+    for i in range(10):
+        dev = f"/dev/video{i}"
+        if os.path.exists(dev) and os.access(dev, os.R_OK | os.W_OK):
+            return dev
+    return None
+
+
+def check_v4l2_device(dev: str) -> tuple[bool, str]:
+    """Prüft, ob ein V4L2-Gerät nutzbar ist."""
+    if not os.path.exists(dev):
+        return False, f"{dev} existiert nicht"
+    if not os.access(dev, os.R_OK | os.W_OK):
+        return False, f"Keine Lese-/Schreibrechte auf {dev}"
+    try:
+        result = subprocess.run(
+            ["fuser", dev], capture_output=True, text=True, timeout=2
+        )
+        if result.stdout.strip():
+            return False, f"{dev} ist von Prozess {result.stdout.strip()} belegt"
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        pass
+    return True, "OK"
+
+
+# ============================================================
 # AUTO-INSTALLER
 # ============================================================
 
@@ -143,27 +171,10 @@ class AutoInstaller:
 
     @staticmethod
     def check_dependencies():
-        checks = {
+        return {
             "dvgrab": shutil.which("dvgrab") is not None,
             "ffmpeg": shutil.which("ffmpeg") is not None,
-            "tkinter": False, "cv2": False, "PIL": False
         }
-        try:
-            import tkinter
-            checks["tkinter"] = True
-        except:
-            pass
-        try:
-            import cv2
-            checks["cv2"] = True
-        except:
-            pass
-        try:
-            from PIL import Image
-            checks["PIL"] = True
-        except:
-            pass
-        return checks
 
     @staticmethod
     def install_all(progress_callback=None):
@@ -173,23 +184,23 @@ class AutoInstaller:
             progress_callback("📦 Installiere Systempakete...", 30)
 
         if system == "debian":
-            success, _, _ = AutoInstaller.run_command(
-                "sudo apt update && sudo apt install -y dvgrab ffmpeg python3-tk python3-dev python3-pil.imagetk v4l-utils"
+            AutoInstaller.run_command(
+                "sudo apt update && sudo apt install -y dvgrab ffmpeg python3-tk python3-dev python3-pil.imagetk v4l-utils psmisc"
             )
         elif system == "fedora":
-            success, _, _ = AutoInstaller.run_command(
-                "sudo dnf install -y dvgrab ffmpeg python3-tkinter python3-devel python3-pillow v4l-utils"
+            AutoInstaller.run_command(
+                "sudo dnf install -y dvgrab ffmpeg python3-tkinter python3-devel python3-pillow v4l-utils psmisc"
             )
         elif system == "arch":
-            success, _, _ = AutoInstaller.run_command(
-                "sudo pacman -S --noconfirm dvgrab ffmpeg python-tk python-pillow v4l-utils"
+            AutoInstaller.run_command(
+                "sudo pacman -S --noconfirm dvgrab ffmpeg python-tk python-pillow v4l-utils psmisc"
             )
         elif system == "macos":
             if not shutil.which("brew"):
                 AutoInstaller.run_command('/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"')
-            success, _, _ = AutoInstaller.run_command("brew install dvgrab ffmpeg")
+            AutoInstaller.run_command("brew install dvgrab ffmpeg")
         else:
-            success = True
+            pass
 
         if progress_callback:
             progress_callback("📦 Installiere Python-Pakete...", 60)
@@ -359,6 +370,8 @@ class MiniDVRecorder:
         self.last_frame_time = 0
         self.write_error_count = 0
         self.ffmpeg_log_lines = []
+
+        self.video_device: str | None = find_video_device()
 
         self.preview_available = PREVIEW_AVAILABLE
         print(f"📺 Vorschau im Programm: {self.preview_available}")
@@ -554,31 +567,60 @@ class MiniDVRecorder:
             messagebox.showinfo("Info", "Vorschau nur im USB-Modus verfügbar")
             return
 
-        try:
-            self._fix_webcam_permissions()
-            self.cap = cv2.VideoCapture(0)
-
-            if not self.cap.isOpened():
-                messagebox.showerror("Fehler", "Webcam konnte nicht geöffnet werden")
-                return
-
-            self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-            self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
-            self.cap.set(cv2.CAP_PROP_FPS, 30)
-
-            for _ in range(5):
-                self.cap.read()
-
-            ret, frame = self.cap.read()
-            if not ret or frame is None:
-                self.cap.release()
-                messagebox.showerror("Fehler", "Webcam liefert kein Bild")
-                return
-
-        except Exception as e:
-            messagebox.showerror("Fehler", f"Webcam Fehler: {str(e)}")
+        if not self.video_device:
+            self.video_device = find_video_device()
+        if not self.video_device:
+            messagebox.showerror("Fehler",
+                "Keine Webcam gefunden!\n\n"
+                "Prüfe mit:\n  ls /dev/video*\n  lsusb")
             return
 
+        ok, reason = check_v4l2_device(self.video_device)
+        if not ok:
+            messagebox.showerror("Kamera nicht verfügbar", reason)
+            return
+
+        # --- WICHTIG: V4L2-Backend erzwingen ---
+        # Sonst wählt OpenCV GStreamer und meldet "no camera exists".
+        cap = None
+        try:
+            cap = cv2.VideoCapture(self.video_device, cv2.CAP_V4L2)
+            if not cap.isOpened():
+                cap.release()
+                cap = cv2.VideoCapture(self.video_device)
+            if not cap.isOpened():
+                cap.release()
+                cap = None
+        except Exception as e:
+            print(f"OpenCV-Fehler: {e}")
+            cap = None
+
+        if cap is None or not cap.isOpened():
+            messagebox.showerror("Fehler",
+                f"Webcam {self.video_device} konnte nicht geöffnet werden.\n\n"
+                "Mögliche Ursachen:\n"
+                "• Kamera von anderem Programm belegt\n"
+                "• Falsche Berechtigungen\n"
+                "• Kamera liefert kein Bild")
+            return
+
+        try:
+            cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+            cap.set(cv2.CAP_PROP_FPS, 30)
+            for _ in range(5):
+                cap.read()
+            ret, frame = cap.read()
+            if not ret or frame is None:
+                cap.release()
+                messagebox.showerror("Fehler", "Webcam liefert kein Bild")
+                return
+        except Exception as e:
+            cap.release()
+            messagebox.showerror("Fehler", f"Webcam Fehler: {e}")
+            return
+
+        self.cap = cap
         self.preview_running = True
         self.preview_start_btn.config(state="disabled")
         self.preview_stop_btn.config(state="normal")
@@ -592,6 +634,7 @@ class MiniDVRecorder:
             try:
                 ret, frame = self.cap.read()
                 if not ret or frame is None:
+                    time.sleep(0.1)
                     continue
 
                 frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
@@ -608,13 +651,10 @@ class MiniDVRecorder:
 
                 img = Image.fromarray(canvas)
                 img_tk = ImageTk.PhotoImage(img)
-
                 self.master.after(0, self._update_preview, img_tk)
-
             except Exception as e:
                 print(f"Vorschau Fehler: {e}")
                 break
-
             time.sleep(1.0 / self.preview_fps)
 
     def _update_preview(self, img_tk):
@@ -664,11 +704,10 @@ class MiniDVRecorder:
         else:
             self.dep_status.config(text="✅ System-Abhängigkeiten: OK", fg="green")
 
-        devices = glob.glob("/dev/video*")
-        if devices:
-            self.camera_status.config(text=f"📷 Webcam gefunden: {', '.join(devices)}", fg="green")
+        if self.video_device:
+            self.camera_status.config(text=f"📷 Kamera gefunden: {self.video_device}", fg="green")
         else:
-            self.camera_status.config(text="⚠️ Keine Webcam gefunden", fg="orange")
+            self.camera_status.config(text="⚠️ Keine Webcam gefunden (/dev/video0 fehlt)", fg="orange")
 
     def on_mode_change(self):
         if self.preview_running:
@@ -724,6 +763,20 @@ class MiniDVRecorder:
         if self.preview_running:
             self.stop_preview()
 
+        # Kamera-Check VOR FFmpeg-Start
+        if self.mode == "usb":
+            if not self.video_device:
+                self.video_device = find_video_device()
+            if not self.video_device:
+                messagebox.showerror("Fehler",
+                    "Keine Webcam gefunden!\n\n"
+                    "Prüfe mit:\n  ls /dev/video*\n  lsusb")
+                return
+            ok, reason = check_v4l2_device(self.video_device)
+            if not ok:
+                messagebox.showerror("Kamera nicht verfügbar", reason)
+                return
+
         self.segment_count = 0
         self.segment_base_name = filename
         self.segment_files = []
@@ -744,7 +797,6 @@ class MiniDVRecorder:
         if not DependencyManager.check_dependency("dvgrab"):
             messagebox.showerror("Fehler", "dvgrab nicht installiert!\nsudo apt install dvgrab")
             return
-
         prefix = os.path.join(self.output_dir, filename + "_")
         try:
             self.process = subprocess.Popen(
@@ -761,7 +813,6 @@ class MiniDVRecorder:
             self.recording_active = False
 
     def _start_usb_segmented(self, filename):
-        """Startet FFmpeg mit nativer Segmentierung und hardware-schonenden Parametern."""
         if not DependencyManager.check_dependency("ffmpeg"):
             messagebox.showerror("Fehler", "ffmpeg nicht installiert!\nsudo apt install ffmpeg")
             return
@@ -774,7 +825,7 @@ class MiniDVRecorder:
             has_alsa = os.path.exists("/dev/snd") or shutil.which("arecord") is not None
 
             cmd = [
-                "ffmpeg",                               # ← FIX: ffmpeg als Programmname
+                "ffmpeg",
                 "-hide_banner",
                 "-loglevel", "info",
                 "-thread_queue_size", "1024",
@@ -785,7 +836,7 @@ class MiniDVRecorder:
                 "-video_size", "640x480",
                 "-fflags", "nobuffer",
                 "-flags", "low_delay",
-                "-i", "/dev/video0",
+                "-i", self.video_device,
             ]
 
             if has_alsa:
@@ -808,7 +859,6 @@ class MiniDVRecorder:
             if has_alsa:
                 cmd += ["-c:a", "aac", "-b:a", "96k"]
 
-            # KEIN -t! Bei -f segment läuft die Aufnahme endlos und rotiert selbst.
             cmd += [
                 "-vsync", "cfr",
                 "-async", "1",
@@ -835,7 +885,6 @@ class MiniDVRecorder:
             )
 
             threading.Thread(target=self._read_ffmpeg_output, daemon=True).start()
-
             self.master.after(5000, self._verify_recording_started)
 
             self._set_recording_state(True)
@@ -844,7 +893,7 @@ class MiniDVRecorder:
             self.status_detail.config(text=f"📹 Aufnahme: {filename}_segXXX.mkv")
 
         except Exception as e:
-            err_msg = str(e)                            # ← FIX: Wert vorher sichern
+            err_msg = str(e)
             print(f"❌ Fehler beim Starten der Aufnahme: {err_msg}")
             self.process = None
             self.recording_active = False
