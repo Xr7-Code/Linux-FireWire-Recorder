@@ -795,6 +795,8 @@ class MiniDVRecorder:
                 "-input_format", "mjpeg",
                 "-framerate", "25",
                 "-video_size", "640x480",
+                "-fflags", "nobuffer",
+                "-flags", "low_delay",
                 "-i", "/dev/video0",
             ]
             
@@ -803,25 +805,24 @@ class MiniDVRecorder:
                 cmd += ["-f", "alsa", "-i", "default"]
             
             cmd += [
-                "-fflags", "nobuffer",
-                "-flags", "low_delay",
-                "-tune", "zerolatency",
                 "-c:v", "libx264",
                 "-preset", "ultrafast",
-                "-crf", "23",
-                "-profile:v", "baseline",
-                "-level", "3.0",
-                "-pix_fmt", "yuv420p",
+                "-tune", "zerolatency",
+                "-crf", "26",
+                # --- NEU: Feste Keyframes für saubere Segmente ---
+                "-g", "50",
+                "-keyint_min", "25",
+                # ---------------------------------------------
             ]
             
             if has_alsa:
-                cmd += ["-c:a", "aac", "-b:a", "128k"]
+                cmd += ["-c:a", "aac", "-b:a", "96k"]
             
             cmd += [
+                "-pix_fmt", "yuv420p",
                 "-f", "segment",
                 "-segment_time", str(self.segment_duration),
                 "-reset_timestamps", "1",
-                "-segment_format", "matroska",
                 "-y",
                 output_pattern
             ]
