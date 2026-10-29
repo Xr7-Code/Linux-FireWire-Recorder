@@ -2,6 +2,7 @@
 """
 MiniDV Recorder - PRODUKTIONSREIFE VERSION MIT KORREKTER SEGMENTIERUNG
 Unterstützt FireWire und USB Webcam Aufnahmen mit stabiler, langer Laufzeit
+Optimiert: MKV-Container, native FFmpeg-Segmentierung, Querformat-Layout
 """
 
 import os
@@ -347,7 +348,7 @@ class MiniDVRecorder:
         self.current_output_file = None
         self.segment_thread_running = False
         
-        # Segmentierung
+        # Segmentierung (wird jetzt von FFmpeg nativ übernommen)
         self.segment_duration = 600  # 10 Minuten pro Segment
         self.segment_count = 0
         self.segment_base_name = ""
@@ -365,7 +366,8 @@ class MiniDVRecorder:
         os.environ['TERM'] = 'xterm-256color'
 
         self.master.title("MiniDV Recorder - Produktionsversion")
-        self.master.geometry("520x720")
+        # Kompakteres Querformat (780x520) für kleine Bildschirme
+        self.master.geometry("780x520")
         self.master.resizable(False, False)
         
         self._fix_webcam_permissions()
@@ -381,9 +383,17 @@ class MiniDVRecorder:
                 pass
     
     def setup_ui(self):
-        # ===== OBERER BEREICH =====
-        top = tk.Frame(self.master)
-        top.pack(pady=(10, 3))
+        # ===== HAUPT-CONTAINER (zweispaltig) =====
+        main_container = tk.Frame(self.master)
+        main_container.pack(fill="both", expand=True, padx=8, pady=6)
+        
+        # ----- LINKE SPALTE (Vorschau + Quelle) -----
+        left_col = tk.Frame(main_container)
+        left_col.pack(side=tk.LEFT, fill="both", expand=True, padx=(0, 6))
+        
+        # Quelle
+        top = tk.Frame(left_col)
+        top.pack(pady=(0, 3))
         
         tk.Label(top, text="Quelle:", font=("Arial", 10, "bold")).pack(side=tk.LEFT, padx=3)
         self.mode_var = tk.StringVar(value="firewire")
@@ -398,43 +408,40 @@ class MiniDVRecorder:
             command=self.on_mode_change)
         self.usb_radio.pack(side=tk.LEFT, padx=3)
         
-        # ===== STATUS =====
-        self.dep_status = tk.Label(self.master, text="⏳ Prüfe Abhängigkeiten...", 
+        # Status
+        self.dep_status = tk.Label(left_col, text="⏳ Prüfe Abhängigkeiten...", 
             font=("Arial", 8), fg="orange")
         self.dep_status.pack()
         
-        self.camera_status = tk.Label(self.master, text="📹 Kamera bereit", 
+        self.camera_status = tk.Label(left_col, text="📹 Kamera bereit", 
             font=("Arial", 9, "bold"), fg="gray")
         self.camera_status.pack(pady=(2, 3))
         
-        # ===== TITEL =====
-        tk.Label(self.master, text="Digitalisierung von Videoquellen", 
-            font=("Arial", 13, "bold")).pack(pady=(5, 2))
-        
-        self.hint_label = tk.Label(self.master, text="", font=("Arial", 8), fg="gray")
+        # Hinweis
+        self.hint_label = tk.Label(left_col, text="", font=("Arial", 8), fg="gray")
         self.hint_label.pack()
         self.update_hint()
         
-        # ===== VORSCHAU =====
-        preview_frame = tk.Frame(self.master, bd=2, relief="groove")
-        preview_frame.pack(pady=5, padx=10, fill="x")
+        # Vorschau
+        preview_frame = tk.Frame(left_col, bd=2, relief="groove")
+        preview_frame.pack(pady=4, fill="x")
         
-        tk.Label(preview_frame, text="📺 Live-Vorschau", font=("Arial", 9, "bold")).pack(pady=(3, 0))
+        tk.Label(preview_frame, text="📺 Live-Vorschau", font=("Arial", 9, "bold")).pack(pady=(2, 0))
         
-        self.preview_canvas = tk.Canvas(preview_frame, width=480, height=270, bg="black")
-        self.preview_canvas.pack(pady=5, padx=5)
+        self.preview_canvas = tk.Canvas(preview_frame, width=420, height=236, bg="black")
+        self.preview_canvas.pack(pady=3, padx=3)
         
         if self.preview_available:
-            self.preview_canvas.create_text(240, 135, 
+            self.preview_canvas.create_text(210, 118, 
                 text="🖥️ Vorschau bereit\n\nKlicke auf 'Vorschau starten'",
-                fill="white", font=("Arial", 11), justify="center")
+                fill="white", font=("Arial", 10), justify="center")
         else:
-            self.preview_canvas.create_text(240, 135,
+            self.preview_canvas.create_text(210, 118,
                 text="⚠️ Vorschau nicht verfügbar\n\nInstalliere:\nsudo apt install python3-pil.imagetk",
                 fill="yellow", font=("Arial", 9), justify="center")
         
         pbtn_frame = tk.Frame(preview_frame)
-        pbtn_frame.pack(pady=(0, 5))
+        pbtn_frame.pack(pady=(0, 3))
         
         self.preview_start_btn = tk.Button(pbtn_frame, text="▶ Vorschau starten", width=14,
             font=("Arial", 9), command=self.start_preview,
@@ -447,84 +454,92 @@ class MiniDVRecorder:
             state="disabled", bg="#C62828", fg="white")
         self.preview_stop_btn.pack(side=tk.LEFT, padx=3)
         
-        # ===== SEGMENTIERUNG =====
-        seg_frame = tk.Frame(self.master)
-        seg_frame.pack(pady=3, fill="x", padx=10)
+        # ----- RECHTE SPALTE (Einstellungen + Aufnahme) -----
+        right_col = tk.Frame(main_container)
+        right_col.pack(side=tk.RIGHT, fill="both", padx=(6, 0))
         
-        tk.Label(seg_frame, text="⏱ Segmentierung:", font=("Arial", 9)).pack(side=tk.LEFT)
+        # Titel
+        tk.Label(right_col, text="Digitalisierung", 
+            font=("Arial", 12, "bold")).pack(pady=(0, 2))
+        
+        # Segmentierung
+        seg_frame = tk.Frame(right_col)
+        seg_frame.pack(pady=2, fill="x")
+        
+        tk.Label(seg_frame, text="⏱ Segment:", font=("Arial", 9)).pack(side=tk.LEFT)
         
         self.seg_var = tk.StringVar(value="600")
         seg_options = ["300", "600", "900", "1200", "1800", "3600"]
         self.seg_combo = ttk.Combobox(seg_frame, textvariable=self.seg_var, 
-                                       values=seg_options, width=8, state="readonly")
-        self.seg_combo.pack(side=tk.LEFT, padx=5)
+                                       values=seg_options, width=6, state="readonly")
+        self.seg_combo.pack(side=tk.LEFT, padx=4)
         self.seg_combo.bind("<<ComboboxSelected>>", self.on_seg_change)
         
-        tk.Label(seg_frame, text="Sekunden", font=("Arial", 9)).pack(side=tk.LEFT)
+        tk.Label(seg_frame, text="s", font=("Arial", 9)).pack(side=tk.LEFT)
         
         tk.Button(seg_frame, text="ℹ️", width=2, font=("Arial", 8),
-                 command=self.show_seg_info).pack(side=tk.RIGHT, padx=5)
+                 command=self.show_seg_info).pack(side=tk.RIGHT, padx=2)
         
-        # ===== SPEICHERORT =====
-        loc_frame = tk.Frame(self.master)
-        loc_frame.pack(pady=3, fill="x", padx=10)
+        # Speicherort
+        loc_frame = tk.Frame(right_col)
+        loc_frame.pack(pady=2, fill="x")
         
         self.output_label = tk.Label(loc_frame, text=f"📁 {self.output_dir}", 
-            font=("Arial", 9), anchor="w", wraplength=350)
+            font=("Arial", 8), anchor="w", wraplength=280)
         self.output_label.pack(side=tk.LEFT, fill="x", expand=True)
         
         tk.Button(loc_frame, text="📁", width=3, command=self.choose_folder).pack(side=tk.RIGHT)
         
-        # ===== DATEINAME =====
-        name_frame = tk.Frame(self.master)
-        name_frame.pack(pady=3, fill="x", padx=10)
+        # Dateiname
+        name_frame = tk.Frame(right_col)
+        name_frame.pack(pady=2, fill="x")
         
         tk.Label(name_frame, text="Datei:", font=("Arial", 9, "bold")).pack(side=tk.LEFT)
         
         self.filename_var = tk.StringVar()
         self.update_default_filename()
         self.filename_entry = tk.Entry(name_frame, textvariable=self.filename_var, 
-            width=28, font=("Arial", 9))
-        self.filename_entry.pack(side=tk.LEFT, padx=5)
+            width=24, font=("Arial", 9))
+        self.filename_entry.pack(side=tk.LEFT, padx=4)
         
-        tk.Label(name_frame, text=".mp4", font=("Arial", 9), fg="gray").pack(side=tk.LEFT)
+        tk.Label(name_frame, text=".mkv", font=("Arial", 9), fg="gray").pack(side=tk.LEFT)
         
-        # ===== CODEC INFO =====
-        codec_frame = tk.Frame(self.master)
-        codec_frame.pack(pady=2)
-        tk.Label(codec_frame, text="Codec: H.264 (MP4) - universell kompatibel", 
+        # Codec Info
+        codec_frame = tk.Frame(right_col)
+        codec_frame.pack(pady=1)
+        tk.Label(codec_frame, text="Codec: H.264 (MKV) - robust & crashsicher", 
             font=("Arial", 8), fg="#1565C0").pack()
         
-        # ===== AUFNAHME BUTTONS =====
-        btn_frame = tk.Frame(self.master)
-        btn_frame.pack(pady=8)
+        # Aufnahme Buttons
+        btn_frame = tk.Frame(right_col)
+        btn_frame.pack(pady=6)
         
         self.start_btn = tk.Button(btn_frame, text="▶ AUFNAHME STARTEN", 
-            font=("Arial", 12, "bold"), width=24,
+            font=("Arial", 11, "bold"), width=22,
             command=self.start_recording, bg="#4CAF50", fg="white")
-        self.start_btn.pack(pady=3)
+        self.start_btn.pack(pady=2)
         
         self.stop_btn = tk.Button(btn_frame, text="■ AUFNAHME STOPPEN",
-            font=("Arial", 12, "bold"), width=24,
+            font=("Arial", 11, "bold"), width=22,
             command=self.stop_recording, state="disabled", 
             bg="#C62828", fg="white")
-        self.stop_btn.pack(pady=3)
+        self.stop_btn.pack(pady=2)
         
-        # ===== STATUS & TIMER =====
-        self.status = tk.Label(self.master, text="Bereit", fg="green", font=("Arial", 11))
-        self.status.pack(pady=3)
+        # Status & Timer
+        self.status = tk.Label(right_col, text="Bereit", fg="green", font=("Arial", 10))
+        self.status.pack(pady=2)
         
-        self.timer_label = tk.Label(self.master, text="⏱ 00:00:00", 
-            font=("Arial", 13, "bold"))
-        self.timer_label.pack(pady=2)
+        self.timer_label = tk.Label(right_col, text="⏱ 00:00:00", 
+            font=("Arial", 12, "bold"))
+        self.timer_label.pack(pady=1)
         
-        # ===== STATUSLEISTE =====
+        # Fortschritt
         self.progress_var = tk.DoubleVar()
-        self.progress_bar = ttk.Progressbar(self.master, variable=self.progress_var, 
-                                            maximum=100, length=400, mode='determinate')
-        self.progress_bar.pack(pady=5)
+        self.progress_bar = ttk.Progressbar(right_col, variable=self.progress_var, 
+                                            maximum=100, length=280, mode='determinate')
+        self.progress_bar.pack(pady=4)
         
-        self.status_detail = tk.Label(self.master, text="", font=("Arial", 8), fg="gray")
+        self.status_detail = tk.Label(right_col, text="", font=("Arial", 8), fg="gray")
         self.status_detail.pack()
     
     def show_seg_info(self):
@@ -597,7 +612,7 @@ class MiniDVRecorder:
                 
                 frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
                 h, w = frame_rgb.shape[:2]
-                tw, th = 480, 270
+                tw, th = 420, 236
                 
                 scale = min(tw/w, th/h)
                 nw, nh = int(w*scale), int(h*scale)
@@ -633,9 +648,9 @@ class MiniDVRecorder:
         self.preview_stop_btn.config(state="disabled")
         self.preview_canvas.delete("all")
         if self.preview_available:
-            self.preview_canvas.create_text(240, 135,
+            self.preview_canvas.create_text(210, 118,
                 text="🖥️ Vorschau bereit\n\nKlicke auf 'Vorschau starten'",
-                fill="white", font=("Arial", 11), justify="center")
+                fill="white", font=("Arial", 10), justify="center")
         self.status.config(text="Bereit", fg="green")
         self.camera_status.config(text="📹 Bereit" if self.mode == "firewire" else "🎥 Bereit", fg="gray")
     
@@ -681,9 +696,9 @@ class MiniDVRecorder:
         self.status.config(text="Bereit", fg="green")
         if self.mode != "usb" and self.preview_available:
             self.preview_canvas.delete("all")
-            self.preview_canvas.create_text(240, 135,
+            self.preview_canvas.create_text(210, 118,
                 text="ℹ️ Vorschau nur im USB-Modus",
-                fill="white", font=("Arial", 12))
+                fill="white", font=("Arial", 11))
     
     def update_hint(self):
         if self.mode == "firewire":
@@ -693,7 +708,7 @@ class MiniDVRecorder:
                 self.hint_label.config(text="⚠️ dvgrab fehlt! Installiere: sudo apt install dvgrab")
         else:
             if DependencyManager.check_dependency("ffmpeg"):
-                self.hint_label.config(text="🎥 USB: Webcam | Codec: H.264 (MP4) | Segmentierung aktiv")
+                self.hint_label.config(text="🎥 USB: Webcam | Codec: H.264 (MKV) | Segmentierung aktiv")
             else:
                 self.hint_label.config(text="⚠️ ffmpeg fehlt! Installiere: sudo apt install ffmpeg")
     
@@ -761,104 +776,87 @@ class MiniDVRecorder:
             self.recording_active = False
     
     def _start_usb_segmented(self, filename):
-        """Startet ein neues USB-Aufnahmesegment"""
-        with self.segment_lock:
-            if not self.recording_active:
-                return
-            
-            self.segment_count += 1
-            seg_filename = f"{filename}_seg{self.segment_count:03d}"
-            output_file = os.path.join(self.output_dir, seg_filename + ".mp4")
-            self.current_output_file = output_file
-            self.segment_files.append(output_file)
-            
-            try:
-                print(f"📹 Starte Segment {self.segment_count}: {seg_filename}.mp4")
-                
-                self.process = subprocess.Popen(
-                    [
-                        "ffmpeg",
-                        "-f", "v4l2",
-                        "-framerate", "30",
-                        "-video_size", "640x480",
-                        "-i", "/dev/video0",
-                        "-f", "alsa",
-                        "-i", "default",
-                        "-c:v", "libx264",
-                        "-preset", "veryfast",
-                        "-crf", "23",
-                        "-profile:v", "baseline",
-                        "-level", "3.0",
-                        "-c:a", "aac",
-                        "-b:a", "128k",
-                        "-pix_fmt", "yuv420p",
-                        "-movflags", "+faststart",
-                        "-t", str(self.segment_duration),
-                        "-y",
-                        output_file
-                    ],
-                    stdout=subprocess.PIPE, 
-                    stderr=subprocess.STDOUT, 
-                    text=True, 
-                    bufsize=1
-                )
-                
-                # Starte Thread zum Lesen der Ausgabe
-                threading.Thread(target=self._read_ffmpeg_output, daemon=True).start()
-                
-                # Starte Thread zum Überwachen des Segments
-                threading.Thread(target=self._monitor_segment, daemon=True).start()
-                
-                self._set_recording_state(True)
-                self.status.config(text=f"● USB Aufnahme Segment {self.segment_count}", fg="red")
-                self.camera_status.config(text=f"🎥 Webcam aktiv - Segment {self.segment_count}", fg="green")
-                self.status_detail.config(text=f"📹 Aufnahme: {seg_filename}.mp4")
-                
-            except Exception as e:
-                print(f"❌ Fehler beim Starten von Segment {self.segment_count}: {e}")
-                self.process = None
-                self.recording_active = False
-                self.master.after(0, lambda: messagebox.showerror("Fehler", 
-                    f"Segment {self.segment_count} konnte nicht gestartet werden:\n\n{str(e)}"))
-    
-    def _monitor_segment(self):
-        """Überwacht das aktuelle Segment und startet bei Bedarf das nächste"""
-        if not self.process:
+        """Startet FFmpeg mit nativer Segmentierung in MKV-Container"""
+        if not DependencyManager.check_dependency("ffmpeg"):
+            messagebox.showerror("Fehler", "ffmpeg nicht installiert!\nsudo apt install ffmpeg")
             return
         
-        # Warte auf Prozess-Ende
-        self.process.wait()
+        output_pattern = os.path.join(self.output_dir, f"{filename}_seg%03d.mkv")
         
-        # Prüfe ob die Aufnahme noch aktiv ist
-        if not self.recording_active:
-            return
-        
-        # Prüfe ob die Datei gültig ist
-        if self.current_output_file and os.path.exists(self.current_output_file):
-            size = os.path.getsize(self.current_output_file)
-            if size > 1000:  # Mindestens 1KB
-                print(f"✅ Segment {self.segment_count} gespeichert: {size/1024/1024:.2f} MB")
-            else:
-                print(f"⚠️ Segment {self.segment_count} zu klein: {size} bytes")
-        
-        # Setze process zurück und starte nächstes Segment
-        self.process = None
-        
-        if self.recording_active:
-            # Kurze Pause bevor nächstes Segment startet
-            time.sleep(0.5)
-            print(f"🔄 Starte nächstes Segment...")
-            self.master.after(0, self._start_next_segment)
-    
-    def _start_next_segment(self):
-        """Startet das nächste Aufnahmesegment (wird im Hauptthread ausgeführt)"""
-        if self.recording_active and self.process is None:
-            self._start_usb_segmented(self.segment_base_name)
+        try:
+            print(f"📹 Starte native FFmpeg-Segmentierung: {filename}_seg%03d.mkv")
+            
+            # Prüfe Audio-Gerät
+            has_alsa = os.path.exists("/dev/snd") or shutil.which("arecord") is not None
+            
+            cmd = [
+                "ffmpeg",
+                "-f", "v4l2",
+                "-input_format", "mjpeg",
+                "-framerate", "25",
+                "-video_size", "640x480",
+                "-i", "/dev/video0",
+            ]
+            
+            # Audio nur hinzufügen wenn verfügbar
+            if has_alsa:
+                cmd += ["-f", "alsa", "-i", "default"]
+            
+            cmd += [
+                "-fflags", "nobuffer",
+                "-flags", "low_delay",
+                "-tune", "zerolatency",
+                "-c:v", "libx264",
+                "-preset", "ultrafast",
+                "-crf", "23",
+                "-profile:v", "baseline",
+                "-level", "3.0",
+                "-pix_fmt", "yuv420p",
+            ]
+            
+            if has_alsa:
+                cmd += ["-c:a", "aac", "-b:a", "128k"]
+            
+            cmd += [
+                "-f", "segment",
+                "-segment_time", str(self.segment_duration),
+                "-reset_timestamps", "1",
+                "-segment_format", "matroska",
+                "-y",
+                output_pattern
+            ]
+            
+            print(f"🔧 FFmpeg Befehl: {' '.join(cmd)}")
+            
+            self.process = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE, 
+                stderr=subprocess.STDOUT, 
+                text=True, 
+                bufsize=1
+            )
+            
+            # Starte Thread zum Lesen der Ausgabe
+            threading.Thread(target=self._read_ffmpeg_output, daemon=True).start()
+            
+            self._set_recording_state(True)
+            self.status.config(text="● USB Aufnahme (FFmpeg-Segmentierung)", fg="red")
+            self.camera_status.config(text="🎥 Webcam aktiv - Segmentierung läuft", fg="green")
+            self.status_detail.config(text=f"📹 Aufnahme: {filename}_segXXX.mkv")
+            
+        except Exception as e:
+            print(f"❌ Fehler beim Starten der Aufnahme: {e}")
+            self.process = None
+            self.recording_active = False
+            self.master.after(0, lambda: messagebox.showerror("Fehler", 
+                f"Aufnahme konnte nicht gestartet werden:\n\n{str(e)}"))
     
     def _monitor_recording(self):
-        """Überwacht die Aufnahme auf Probleme"""
+        """Überwacht die Aufnahme auf Probleme und sammelt Segmentdateien"""
+        last_scan = time.time()
+        
         while self.recording_active:
-            time.sleep(5)
+            time.sleep(3)
             
             # Prüfe auf freien Speicherplatz
             try:
@@ -869,6 +867,20 @@ class MiniDVRecorder:
                     break
             except:
                 pass
+            
+            # Sammle Segmentdateien
+            if time.time() - last_scan > 5:
+                last_scan = time.time()
+                pattern = os.path.join(self.output_dir, f"{self.segment_base_name}_seg*.mkv")
+                found = sorted(glob.glob(pattern))
+                for f in found:
+                    if f not in self.segment_files:
+                        self.segment_files.append(f)
+                        self.segment_count = len(self.segment_files)
+                        self.master.after(0, lambda c=self.segment_count: self._update_segment_info(c))
+    
+    def _update_segment_info(self, count):
+        self.status_detail.config(text=f"📹 {count} Segment(e) aufgezeichnet")
     
     def _handle_low_space(self):
         messagebox.showwarning("Warnung", 
@@ -922,18 +934,16 @@ class MiniDVRecorder:
                 if "Input #0" in line:
                     self.master.after(0, lambda: self.camera_status.config(text="🎥 Webcam erkannt", fg="green"))
                 if "frame=" in line:
-                    # Aktualisiere Fortschritt
+                    # Aktualisiere Fortschritt (grob)
                     try:
                         parts = line.split()
                         for i, p in enumerate(parts):
                             if p.startswith("frame="):
                                 frame_num = int(p.split("=")[1])
-                                # Nur alle 100 Frames aktualisieren
-                                if frame_num % 100 == 0:
-                                    # Berechne Fortschritt basierend auf FPS und Dauer
-                                    fps = 30
+                                if frame_num % 50 == 0:
+                                    fps = 25
                                     max_frames = self.segment_duration * fps
-                                    progress = min(100, (frame_num / max_frames) * 100)
+                                    progress = min(100, (frame_num % max_frames) / max_frames * 100)
                                     self.master.after(0, lambda p=progress: self.progress_var.set(p))
                                 break
                     except:
@@ -964,7 +974,8 @@ class MiniDVRecorder:
         if self.process:
             try:
                 print("⏹️ Beende Aufnahme...")
-                self.process.terminate()
+                # Sanft beenden (SIGINT), damit FFmpeg das MKV finalisieren kann
+                self.process.send_signal(signal.SIGINT)
                 try:
                     self.process.wait(timeout=10)
                 except subprocess.TimeoutExpired:
@@ -982,48 +993,16 @@ class MiniDVRecorder:
         self.camera_status.config(text="📹 Bereit" if self.mode == "firewire" else "🎥 Bereit", fg="gray")
         self.update_default_filename()
         
-        # Repariere letzte Datei falls nötig
-        if self.mode == "usb" and self.segment_files:
-            self.master.after(500, self._repair_last_files)
+        # Sammle finale Segmentdateien
+        if self.mode == "usb":
+            pattern = os.path.join(self.output_dir, f"{self.segment_base_name}_seg*.mkv")
+            found = sorted(glob.glob(pattern))
+            self.segment_files = found
         
         messagebox.showinfo("Aufnahme beendet", 
             f"Die Aufnahme wurde erfolgreich beendet.\n\n"
             f"Erstellte Dateien: {len(self.segment_files)}\n"
             f"Speicherort: {self.output_dir}")
-    
-    def _repair_last_files(self):
-        """Repariert alle Segmente"""
-        for file in self.segment_files:
-            if os.path.exists(file) and os.path.getsize(file) > 0:
-                self._repair_file(file)
-    
-    def _repair_file(self, filepath):
-        """Repariert eine einzelne MP4-Datei"""
-        try:
-            # Prüfe ob Datei gültig ist
-            check_cmd = ["ffprobe", "-v", "error", "-show_entries", "format=duration", 
-                        "-of", "default=noprint_wrappers=1:nokey=1", filepath]
-            result = subprocess.run(check_cmd, capture_output=True, text=True)
-            
-            if result.returncode != 0 or not result.stdout.strip():
-                print(f"⚠️ Repariere Datei: {filepath}")
-                
-                # Reparieren mit ffmpeg
-                temp_file = filepath + ".tmp"
-                repair_cmd = [
-                    "ffmpeg", "-err_detect", "ignore_err",
-                    "-i", filepath,
-                    "-c", "copy",
-                    "-movflags", "+faststart",
-                    temp_file
-                ]
-                subprocess.run(repair_cmd, capture_output=True)
-                
-                if os.path.exists(temp_file) and os.path.getsize(temp_file) > 0:
-                    os.replace(temp_file, filepath)
-                    print(f"✅ Datei repariert: {os.path.basename(filepath)}")
-        except Exception as e:
-            print(f"Fehler bei Reparatur: {e}")
     
     def close(self):
         if self.preview_running:
