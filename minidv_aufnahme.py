@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 MiniDV Recorder - PRODUKTIONSREIFE VERSION MIT KORREKTER SEGMENTIERUNG
-Unterstützt FireWire und USB Webcam Aufnahmen mit stabiler, langer Laufzeit
+Unterstützt FireWire (FFmpeg iec61883) und USB Webcam Aufnahmen
 Optimiert: MKV-Container, native FFmpeg-Segmentierung, Querformat-Layout,
            hardware-schonende FFmpeg-Parameter für ältere Systeme
 """
@@ -172,7 +172,6 @@ class AutoInstaller:
     @staticmethod
     def check_dependencies():
         return {
-            "dvgrab": shutil.which("dvgrab") is not None,
             "ffmpeg": shutil.which("ffmpeg") is not None,
         }
 
@@ -185,20 +184,20 @@ class AutoInstaller:
 
         if system == "debian":
             AutoInstaller.run_command(
-                "sudo apt update && sudo apt install -y dvgrab ffmpeg python3-tk python3-dev python3-pil.imagetk v4l-utils psmisc"
+                "sudo apt update && sudo apt install -y ffmpeg python3-tk python3-dev python3-pil.imagetk v4l-utils psmisc"
             )
         elif system == "fedora":
             AutoInstaller.run_command(
-                "sudo dnf install -y dvgrab ffmpeg python3-tkinter python3-devel python3-pillow v4l-utils psmisc"
+                "sudo dnf install -y ffmpeg python3-tkinter python3-devel python3-pillow v4l-utils psmisc"
             )
         elif system == "arch":
             AutoInstaller.run_command(
-                "sudo pacman -S --noconfirm dvgrab ffmpeg python-tk python-pillow v4l-utils psmisc"
+                "sudo pacman -S --noconfirm ffmpeg python-tk python-pillow v4l-utils psmisc"
             )
         elif system == "macos":
             if not shutil.which("brew"):
                 AutoInstaller.run_command('/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"')
-            AutoInstaller.run_command("brew install dvgrab ffmpeg")
+            AutoInstaller.run_command("brew install ffmpeg")
         else:
             pass
 
@@ -277,10 +276,6 @@ class DependencyManager:
         missing = []
         install_commands = []
 
-        if not DependencyManager.check_dependency("dvgrab"):
-            missing.append("dvgrab")
-            install_commands.append("dvgrab")
-
         if not DependencyManager.check_dependency("ffmpeg"):
             missing.append("ffmpeg")
             install_commands.append("ffmpeg")
@@ -294,7 +289,6 @@ class DependencyManager:
             msg = ("Folgende Programme werden benötigt:\n\n" +
                    f"{', '.join(missing)}\n\n" +
                    "Bitte installiere sie manuell:\n" +
-                   "• dvgrab: https://sourceforge.net/projects/dvgrab/\n" +
                    "• ffmpeg: https://ffmpeg.org/download.html")
             messagebox.showwarning("Abhängigkeiten fehlen", msg)
             return False, "Manuelle Installation erforderlich"
@@ -344,7 +338,6 @@ class MiniDVRecorder:
     def __init__(self, master):
         self.master = master
         self.process = None
-        self.dvgrab_process = None
         self.recording_start = None
         self.timer_running = False
         self.mode = "firewire"
@@ -696,10 +689,9 @@ class MiniDVRecorder:
             progress.update()
             return progress
 
-        dvgrab_ok = DependencyManager.check_dependency("dvgrab")
         ffmpeg_ok = DependencyManager.check_dependency("ffmpeg")
 
-        if not dvgrab_ok or not ffmpeg_ok:
+        if not ffmpeg_ok:
             self.dep_status.config(text="⚠️ Einige Abhängigkeiten fehlen", fg="orange")
             success, msg = DependencyManager.ensure_dependencies(self.master, show_progress)
             if success:
@@ -730,10 +722,10 @@ class MiniDVRecorder:
 
     def update_hint(self):
         if self.mode == "firewire":
-            if DependencyManager.check_dependency("dvgrab"):
-                self.hint_label.config(text="📹 FireWire: MiniDV Camcorder | Codec: DV → .dv")
+            if DependencyManager.check_dependency("ffmpeg"):
+                self.hint_label.config(text="📹 FireWire: Camcorder live | Codec: DV → H.264 (MKV)")
             else:
-                self.hint_label.config(text="⚠️ dvgrab fehlt! Installiere: sudo apt install dvgrab")
+                self.hint_label.config(text="⚠️ ffmpeg fehlt! Installiere: sudo apt install ffmpeg")
         else:
             if DependencyManager.check_dependency("ffmpeg"):
                 self.hint_label.config(text="🎥 USB: Webcam | Codec: H.264 (MKV) | Segmentierung aktiv")
@@ -768,7 +760,7 @@ class MiniDVRecorder:
         if self.preview_running:
             self.stop_preview()
 
-        # Kamera-Check VOR FFmpeg-Start
+        # Kamera-Check VOR FFmpeg-Start (nur USB)
         if self.mode == "usb":
             if not self.video_device:
                 self.video_device = find_video_device()
@@ -807,8 +799,8 @@ class MiniDVRecorder:
         cmd = ["ffmpeg", "-hide_banner", "-loglevel", "info"]
 
         if firewire:
-            # DV-Datenstrom von dvgrab auf stdin, Audio ist im DV-Stream enthalten
-            cmd += ["-f", "dv", "-i", "pipe:0"]
+            # Direkte FireWire-DV-Erfassung über iec61883 (kein dvgrab nötig)
+            cmd += ["-f", "iec61883", "-i", "auto"]
         else:
             cmd += [
                 "-thread_queue_size", "1024",
@@ -841,7 +833,7 @@ class MiniDVRecorder:
             "-g", "50",
             "-keyint_min", "25",
             "-c:a", "aac", "-b:a", "96k",
-            "-vsync", "cfr",
+            "-fps_mode", "cfr",
             "-pix_fmt", "yuv420p",
             "-avoid_negative_ts", "make_zero",
             "-fflags", "+genpts",
@@ -898,9 +890,6 @@ class MiniDVRecorder:
             print(f"⚠️ FS-Prüfung fehlgeschlagen: {e}")
 
     def _start_firewire(self, filename):
-        if not DependencyManager.check_dependency("dvgrab"):
-            messagebox.showerror("Fehler", "dvgrab nicht installiert!\nsudo apt install dvgrab")
-            return
         if not DependencyManager.check_dependency("ffmpeg"):
             messagebox.showerror("Fehler", "ffmpeg nicht installiert!\nsudo apt install ffmpeg")
             return
@@ -908,25 +897,22 @@ class MiniDVRecorder:
         output_pattern = os.path.join(self.output_dir, f"{filename}_seg%03d.mkv")
 
         try:
-            print(f"📹 Starte FireWire-Pipeline (dvgrab -> ffmpeg): {filename}_seg%03d.mkv")
+            print(f"📹 Starte FireWire-Aufnahme (iec61883): {filename}_seg%03d.mkv")
 
             self._open_ffmpeg_log(filename)
-            self.dvgrab_process = subprocess.Popen(
-                ["dvgrab", "-f", "raw", "-noavc", "-"],
-                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL
-            )
             self.process = subprocess.Popen(
                 self._build_ffmpeg_cmd(firewire=True, output_pattern=output_pattern),
-                stdin=self.dvgrab_process.stdout,
-                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1
             )
-            self.dvgrab_process.stdout.close()
 
             threading.Thread(target=self._read_ffmpeg_output, daemon=True).start()
             self.master.after(5000, self._verify_recording_started)
 
             self._set_recording_state(True)
-            self.status.config(text="● FireWire Aufnahme (dvgrab -> ffmpeg -> MKV)", fg="red")
+            self.status.config(text="● FireWire Aufnahme (iec61883 → MKV)", fg="red")
             self.camera_status.config(text="📹 Kamera aktiv - Segmentierung läuft", fg="green")
             self.status_detail.config(text=f"📹 Aufnahme: {filename}_segXXX.mkv")
 
@@ -935,7 +921,6 @@ class MiniDVRecorder:
             print(f"❌ Fehler beim Starten der Aufnahme: {err_msg}")
             self._close_ffmpeg_log()
             self.process = None
-            self.dvgrab_process = None
             self.recording_active = False
             self.master.after(0, lambda msg=err_msg: messagebox.showerror(
                 "Fehler", f"Aufnahme konnte nicht gestartet werden:\n\n{msg}"))
@@ -1030,14 +1015,6 @@ class MiniDVRecorder:
                 self.master.after(0, self._on_ffmpeg_unexpected_exit)
                 break
 
-            # FireWire: dvgrab beendet sich, wenn das Band zu Ende ist
-            # -> sauber stoppen, statt auf ewig weiterzuzählen
-            if self.mode == "firewire" and self.dvgrab_process \
-                    and self.dvgrab_process.poll() is not None:
-                print("ℹ️ dvgrab beendet (Bandende oder kein DV-Signal).")
-                self.master.after(0, self.stop_recording)
-                break
-
             if time.time() - last_scan > 3:
                 last_scan = time.time()
                 pattern = os.path.join(self.output_dir, f"{self.segment_base_name}_seg*.mkv")
@@ -1061,7 +1038,6 @@ class MiniDVRecorder:
             self.status.config(
                 text=f"⚠️ FFmpeg neu gestartet (Versuch {self.restart_count}/3)", fg="orange")
             self.process = None
-            self.dvgrab_process = None
             self._close_ffmpeg_log()
             self.master.after(2000, self._restart_current_recording)
             return
@@ -1119,19 +1095,6 @@ class MiniDVRecorder:
             self.status_detail.config(text="")
             self.progress_var.set(0)
 
-    def _read_dvgrab_output(self):
-        try:
-            for line in self.process.stdout:
-                print(line.strip())
-                if "Found AV/C device" in line:
-                    self.master.after(0, lambda: self.camera_status.config(text="📹 Kamera erkannt", fg="green"))
-                elif "Waiting for DV" in line:
-                    self.master.after(0, lambda: self.camera_status.config(text="📹 Warte auf DV-Signal", fg="orange"))
-                elif "Capture Started" in line:
-                    self.master.after(0, lambda: self.camera_status.config(text="📹 DV-Signal aktiv", fg="green"))
-        except:
-            pass
-
     def _read_ffmpeg_output(self):
         try:
             for line in self.process.stdout:
@@ -1150,7 +1113,10 @@ class MiniDVRecorder:
                     self.ffmpeg_log_lines.pop(0)
 
                 if "Input #0" in line:
-                    self.master.after(0, lambda: self.camera_status.config(text="🎥 Webcam erkannt", fg="green"))
+                    if self.mode == "usb":
+                        self.master.after(0, lambda: self.camera_status.config(text="🎥 Webcam erkannt", fg="green"))
+                    else:
+                        self.master.after(0, lambda: self.camera_status.config(text="📹 DV-Signal erkannt", fg="green"))
                 if "frame=" in line:
                     try:
                         parts = line.split()
@@ -1202,18 +1168,6 @@ class MiniDVRecorder:
                 print(f"Fehler beim Beenden: {e}")
 
             self.process = None
-
-        if self.dvgrab_process:
-            try:
-                self.dvgrab_process.terminate()
-                try:
-                    self.dvgrab_process.wait(timeout=5)
-                except subprocess.TimeoutExpired:
-                    self.dvgrab_process.kill()
-                    self.dvgrab_process.wait()
-            except Exception as e:
-                print(f"Fehler beim Beenden von dvgrab: {e}")
-            self.dvgrab_process = None
 
         self._close_ffmpeg_log()
 
