@@ -344,9 +344,14 @@ class MiniDVRecorder:
     def __init__(self, master):
         self.master = master
         self.process = None
+        self.dvgrab_process = None
         self.recording_start = None
         self.timer_running = False
         self.mode = "firewire"
+        self.restart_count = 0
+        self.current_filename = None
+        self.ffmpeg_log_file = None
+        self._usb_use_mjpeg = True
 
         self.config = Config.load()
         self.output_dir = self.config.get("output_dir", os.path.expanduser("~/Videos/MiniDV"))
@@ -783,6 +788,9 @@ class MiniDVRecorder:
         self.recording_active = True
         self.segment_thread_running = True
         self.ffmpeg_log_lines = []
+        self.restart_count = 0
+        self.current_filename = filename
+        self._warn_if_unreliable_fs()
 
         if self.mode == "firewire":
             self._start_firewire(filename)
@@ -793,52 +801,30 @@ class MiniDVRecorder:
             self.recording_monitor_thread = threading.Thread(target=self._monitor_recording, daemon=True)
             self.recording_monitor_thread.start()
 
-    def _start_firewire(self, filename):
-        if not DependencyManager.check_dependency("dvgrab"):
-            messagebox.showerror("Fehler", "dvgrab nicht installiert!\nsudo apt install dvgrab")
-            return
-        prefix = os.path.join(self.output_dir, filename + "_")
-        try:
-            self.process = subprocess.Popen(
-                ["dvgrab", "-showstatus", "-f", "raw", "-autosplit", "-timestamp", prefix],
-                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1
-            )
-            threading.Thread(target=self._read_dvgrab_output, daemon=True).start()
-            self._set_recording_state(True)
-            self.status.config(text="● FireWire Aufnahme läuft", fg="red")
-        except Exception as e:
-            err_msg = str(e)
-            messagebox.showerror("Fehler", f"Aufnahme konnte nicht gestartet werden:\n\n{err_msg}")
-            self.process = None
-            self.recording_active = False
+    def _build_ffmpeg_cmd(self, firewire: bool, output_pattern: str,
+                          use_mjpeg: bool = True) -> list:
+        """Baut den ffmpeg-Befehl mit nativer Segmentierung (beide Modi)."""
+        cmd = ["ffmpeg", "-hide_banner", "-loglevel", "info"]
 
-    def _start_usb_segmented(self, filename):
-        if not DependencyManager.check_dependency("ffmpeg"):
-            messagebox.showerror("Fehler", "ffmpeg nicht installiert!\nsudo apt install ffmpeg")
-            return
-
-        output_pattern = os.path.join(self.output_dir, f"{filename}_seg%03d.mkv")
-
-        try:
-            print(f"📹 Starte native FFmpeg-Segmentierung: {filename}_seg%03d.mkv")
-
-            has_alsa = os.path.exists("/dev/snd") or shutil.which("arecord") is not None
-
-            cmd = [
-                "ffmpeg",
-                "-hide_banner",
-                "-loglevel", "info",
+        if firewire:
+            # DV-Datenstrom von dvgrab auf stdin, Audio ist im DV-Stream enthalten
+            cmd += ["-f", "dv", "-i", "pipe:0"]
+        else:
+            cmd += [
                 "-thread_queue_size", "1024",
                 "-rtbufsize", "256M",
                 "-f", "v4l2",
-                "-input_format", "mjpeg",
+            ]
+            if use_mjpeg:
+                cmd += ["-input_format", "mjpeg"]
+            cmd += [
                 "-framerate", "25",
                 "-video_size", "640x480",
                 "-fflags", "nobuffer",
                 "-flags", "low_delay",
                 "-i", self.video_device,
             ]
-
+            has_alsa = os.path.exists("/dev/snd") or shutil.which("arecord") is not None
             if has_alsa:
                 cmd += [
                     "-thread_queue_size", "2048",
@@ -846,38 +832,129 @@ class MiniDVRecorder:
                     "-i", "default",
                 ]
 
-            cmd += [
-                "-c:v", "libx264",
-                "-preset", "ultrafast",
-                "-tune", "zerolatency",
-                "-crf", "28",
-                "-threads", "2",
-                "-g", "50",
-                "-keyint_min", "25",
-            ]
+        cmd += [
+            "-c:v", "libx264",
+            "-preset", "ultrafast",
+            "-tune", "zerolatency",
+            "-crf", "28",
+            "-threads", "2",
+            "-g", "50",
+            "-keyint_min", "25",
+            "-c:a", "aac", "-b:a", "96k",
+            "-vsync", "cfr",
+            "-pix_fmt", "yuv420p",
+            "-avoid_negative_ts", "make_zero",
+            "-fflags", "+genpts",
+            "-f", "segment",
+            "-segment_time", str(self.segment_duration),
+            "-segment_format", "matroska",
+            "-reset_timestamps", "1",
+            "-segment_start_number", "0",
+            "-y",
+            output_pattern,
+        ]
+        return cmd
 
-            if has_alsa:
-                cmd += ["-c:a", "aac", "-b:a", "96k"]
+    def _open_ffmpeg_log(self, filename: str):
+        """Loggt die ffmpeg-Ausgabe in eine Datei, damit Absturzursachen sichtbar bleiben."""
+        try:
+            log_path = os.path.join(self.output_dir, f"{filename}_ffmpeg.log")
+            self.ffmpeg_log_file = open(log_path, "a", encoding="utf-8")
+        except Exception as e:
+            print(f"⚠️ Konnte Log-Datei nicht öffnen: {e}")
+            self.ffmpeg_log_file = None
 
-            cmd += [
-                "-vsync", "cfr",
-                "-async", "1",
-                "-pix_fmt", "yuv420p",
-                "-avoid_negative_ts", "make_zero",
-                "-fflags", "+genpts",
-                "-f", "segment",
-                "-segment_time", str(self.segment_duration),
-                "-segment_format", "matroska",
-                "-reset_timestamps", "1",
-                "-segment_start_number", "0",
-                "-y",
-                output_pattern,
-            ]
+    def _close_ffmpeg_log(self):
+        if self.ffmpeg_log_file:
+            try:
+                self.ffmpeg_log_file.close()
+            except Exception:
+                pass
+            self.ffmpeg_log_file = None
 
-            print(f"🔧 FFmpeg Befehl: {' '.join(cmd)}")
+    def _warn_if_unreliable_fs(self):
+        """Warnt, wenn das Zielverzeichnis auf NTFS/FAT (FUSE) liegt."""
+        try:
+            best = None
+            with open("/proc/mounts", "r") as f:
+                for line in f:
+                    parts = line.split()
+                    if len(parts) < 3:
+                        continue
+                    mnt, fstype = parts[1], parts[2]
+                    if fstype in ("fuseblk", "ntfs", "ntfs3", "vfat", "msdos", "exfat") \
+                            and self.output_dir.startswith(mnt):
+                        if best is None or len(mnt) > len(best[1]):
+                            best = (fstype, mnt)
+            if best:
+                messagebox.showwarning(
+                    "Unzuverlässiges Dateisystem",
+                    f"Das Ziel liegt auf einem {best[0]}-Dateisystem ({best[1]}).\n\n"
+                    "NTFS/FAT über FUSE kann bei langen Aufnahmen auf älteren PCs\n"
+                    "zu Abbrüchen führen. Empfehlung: Aufnahmen auf ext4 speichern\n"
+                    "(z. B. ~/Videos/MiniDV) und erst danach auf die Platte kopieren."
+                )
+        except Exception as e:
+            print(f"⚠️ FS-Prüfung fehlgeschlagen: {e}")
 
+    def _start_firewire(self, filename):
+        if not DependencyManager.check_dependency("dvgrab"):
+            messagebox.showerror("Fehler", "dvgrab nicht installiert!\nsudo apt install dvgrab")
+            return
+        if not DependencyManager.check_dependency("ffmpeg"):
+            messagebox.showerror("Fehler", "ffmpeg nicht installiert!\nsudo apt install ffmpeg")
+            return
+
+        output_pattern = os.path.join(self.output_dir, f"{filename}_seg%03d.mkv")
+
+        try:
+            print(f"📹 Starte FireWire-Pipeline (dvgrab -> ffmpeg): {filename}_seg%03d.mkv")
+
+            self._open_ffmpeg_log(filename)
+            self.dvgrab_process = subprocess.Popen(
+                ["dvgrab", "-f", "dv", "-"],
+                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL
+            )
             self.process = subprocess.Popen(
-                cmd,
+                self._build_ffmpeg_cmd(firewire=True, output_pattern=output_pattern),
+                stdin=self.dvgrab_process.stdout,
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1
+            )
+            self.dvgrab_process.stdout.close()
+
+            threading.Thread(target=self._read_ffmpeg_output, daemon=True).start()
+            self.master.after(5000, self._verify_recording_started)
+
+            self._set_recording_state(True)
+            self.status.config(text="● FireWire Aufnahme (dvgrab -> ffmpeg -> MKV)", fg="red")
+            self.camera_status.config(text="📹 Kamera aktiv - Segmentierung läuft", fg="green")
+            self.status_detail.config(text=f"📹 Aufnahme: {filename}_segXXX.mkv")
+
+        except Exception as e:
+            err_msg = str(e)
+            print(f"❌ Fehler beim Starten der Aufnahme: {err_msg}")
+            self._close_ffmpeg_log()
+            self.process = None
+            self.dvgrab_process = None
+            self.recording_active = False
+            self.master.after(0, lambda msg=err_msg: messagebox.showerror(
+                "Fehler", f"Aufnahme konnte nicht gestartet werden:\n\n{msg}"))
+
+    def _start_usb_segmented(self, filename, use_mjpeg: bool = True):
+        if not DependencyManager.check_dependency("ffmpeg"):
+            messagebox.showerror("Fehler", "ffmpeg nicht installiert!\nsudo apt install ffmpeg")
+            return
+
+        output_pattern = os.path.join(self.output_dir, f"{filename}_seg%03d.mkv")
+
+        try:
+            print(f"📹 Starte native FFmpeg-Segmentierung: {filename}_seg%03d.mkv "
+                  f"(mjpeg={use_mjpeg})")
+
+            self._open_ffmpeg_log(filename)
+            self.process = subprocess.Popen(
+                self._build_ffmpeg_cmd(firewire=False, output_pattern=output_pattern,
+                                       use_mjpeg=use_mjpeg),
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 text=True,
@@ -906,8 +983,15 @@ class MiniDVRecorder:
         if self.process is None:
             return
         if self.process.poll() is not None:
-            self.recording_active = False
             self.process = None
+            # Fallback: Manche Webcams können kein MJPEG -> ohne input_format erneut versuchen
+            if self.mode == "usb" and self._usb_use_mjpeg:
+                print("⚠️ Start mit MJPEG fehlgeschlagen, neuer Versuch ohne input_format...")
+                self._usb_use_mjpeg = False
+                self.recording_active = True
+                self._start_usb_segmented(self.current_filename, use_mjpeg=False)
+                return
+            self.recording_active = False
             self._set_recording_state(False)
             self.status.config(text="❌ Aufnahme fehlgeschlagen", fg="red")
             log_tail = "\n".join(self.ffmpeg_log_lines[-20:]) if self.ffmpeg_log_lines else "(keine Ausgabe)"
@@ -946,6 +1030,14 @@ class MiniDVRecorder:
                 self.master.after(0, self._on_ffmpeg_unexpected_exit)
                 break
 
+            # FireWire: dvgrab beendet sich, wenn das Band zu Ende ist
+            # -> sauber stoppen, statt auf ewig weiterzuzählen
+            if self.mode == "firewire" and self.dvgrab_process \
+                    and self.dvgrab_process.poll() is not None:
+                print("ℹ️ dvgrab beendet (Bandende oder kein DV-Signal).")
+                self.master.after(0, self.stop_recording)
+                break
+
             if time.time() - last_scan > 3:
                 last_scan = time.time()
                 pattern = os.path.join(self.output_dir, f"{self.segment_base_name}_seg*.mkv")
@@ -959,15 +1051,38 @@ class MiniDVRecorder:
     def _on_ffmpeg_unexpected_exit(self):
         if not self.recording_active:
             return
+
+        log_tail = "\n".join(self.ffmpeg_log_lines[-15:]) if self.ffmpeg_log_lines else "(keine Ausgabe)"
+        print(f"⚠️ FFmpeg unerwartet beendet. Log-Tail:\n{log_tail}")
+
+        # Automatischer Neustart: Aufnahme läuft weiter statt still zu sterben
+        if self.restart_count < 3:
+            self.restart_count += 1
+            self.status.config(
+                text=f"⚠️ FFmpeg neu gestartet (Versuch {self.restart_count}/3)", fg="orange")
+            self.process = None
+            self.dvgrab_process = None
+            self._close_ffmpeg_log()
+            self.master.after(2000, self._restart_current_recording)
+            return
+
         self.recording_active = False
         self._set_recording_state(False)
         self.status.config(text="❌ Aufnahme unerwartet beendet", fg="red")
-        log_tail = "\n".join(self.ffmpeg_log_lines[-15:]) if self.ffmpeg_log_lines else "(keine Ausgabe)"
         messagebox.showwarning(
             "Aufnahme beendet",
-            "FFmpeg wurde unerwartet beendet.\n\n"
+            "FFmpeg wurde unerwartet beendet (3 Neustartversuche erfolglos).\n\n"
             "Letzte Ausgabe:\n" + log_tail
         )
+
+    def _restart_current_recording(self):
+        if not self.recording_active or not self.current_filename:
+            return
+        print(f"🔄 Starte Aufnahme neu (Versuch {self.restart_count}/3)...")
+        if self.mode == "firewire":
+            self._start_firewire(self.current_filename)
+        else:
+            self._start_usb_segmented(self.current_filename, use_mjpeg=self._usb_use_mjpeg)
 
     def _update_segment_info(self, count):
         self.status_detail.config(text=f"📹 {count} Segment(e) aufgezeichnet")
@@ -1025,6 +1140,12 @@ class MiniDVRecorder:
                     continue
                 print(line)
                 self.ffmpeg_log_lines.append(line)
+                if self.ffmpeg_log_file:
+                    try:
+                        self.ffmpeg_log_file.write(line + "\n")
+                        self.ffmpeg_log_file.flush()
+                    except Exception:
+                        pass
                 if len(self.ffmpeg_log_lines) > 100:
                     self.ffmpeg_log_lines.pop(0)
 
@@ -1081,6 +1202,20 @@ class MiniDVRecorder:
                 print(f"Fehler beim Beenden: {e}")
 
             self.process = None
+
+        if self.dvgrab_process:
+            try:
+                self.dvgrab_process.terminate()
+                try:
+                    self.dvgrab_process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    self.dvgrab_process.kill()
+                    self.dvgrab_process.wait()
+            except Exception as e:
+                print(f"Fehler beim Beenden von dvgrab: {e}")
+            self.dvgrab_process = None
+
+        self._close_ffmpeg_log()
 
         time.sleep(1)
 
