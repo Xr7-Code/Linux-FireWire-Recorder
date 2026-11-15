@@ -912,7 +912,7 @@ class MiniDVRecorder:
 
             self._open_ffmpeg_log(filename)
             self.dvgrab_process = subprocess.Popen(
-                ["dvgrab", "-f", "dv", "-"],
+                ["dvgrab", "-f", "raw", "-noavc", "-"],
                 stdout=subprocess.PIPE, stderr=subprocess.DEVNULL
             )
             self.process = subprocess.Popen(
